@@ -2,7 +2,7 @@
 // Requer variável de ambiente na Netlify: ONESIGNAL_REST_API_KEY
 // e VITE_ONESIGNAL_APP_ID (ou ONESIGNAL_APP_ID)
 
-exports.handler = async function (event) {
+export const handler = async function (event) {
   // Configuração CORS
   const headers = {
     'Access-Control-Allow-Origin': '*',
