@@ -40,9 +40,26 @@ import {
   Sparkles,
   Upload,
   Palmtree,
-  RotateCw
+  RotateCw,
+  BookOpen,
+  Tag,
+  Calculator,
+  Settings2,
+  Edit3,
+  ListPlus,
+  Check
 } from 'lucide-react';
 import { cn, formatCurrency, calcularPontoEValeAutomatico, contarPlantoesTrabalhadosNoMes } from '../../lib/utils';
+import { 
+  PayrollRubric, 
+  SalarySlipLineItem, 
+  DEFAULT_PAYROLL_RUBRICS, 
+  matchRubricDetails, 
+  calculatePayrollTotals, 
+  calculateInss, 
+  calculateIrrf, 
+  PayrollTotals 
+} from '../../lib/payrollRubrics';
 import { motion, AnimatePresence } from 'motion/react';
 import { createNotification } from '../../lib/notifications';
 import { format } from 'date-fns';
@@ -169,8 +186,21 @@ export default function MySalarySlips() {
   const isMobileSize = containerWidth < targetWidth;
   const scale = isMobileSize ? (containerWidth - 16) / targetWidth : 1;
 
+  // Rubrics Catalog & Custom Registration (Admin)
+  const [customRubrics, setCustomRubrics] = useState<PayrollRubric[]>([]);
+  const [showRubricsCatalogModal, setShowRubricsCatalogModal] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [newRubricForm, setNewRubricForm] = useState<PayrollRubric>({
+    code: '',
+    name: '',
+    type: 'addition',
+    defaultReference: ''
+  });
+  const [savingRubric, setSavingRubric] = useState(false);
+
   // New slip form states (Admin)
   const [showAddSlipModal, setShowAddSlipModal] = useState(false);
+  const [slipCreationMode, setSlipCreationMode] = useState<'upload' | 'manual'>('manual');
   const [newSlipForm, setNewSlipForm] = useState({
     userId: '',
     month: new Date().getMonth() + 1,
@@ -187,6 +217,29 @@ export default function MySalarySlips() {
     hasConstitutionalThird: true,
     autoCalculateTaxes: true
   });
+
+  // Structured Rubric Line Items for the current slip
+  const [newSlipItems, setNewSlipItems] = useState<SalarySlipLineItem[]>([
+    {
+      id: 'item-base-init',
+      code: '8781',
+      description: 'DIAS NORMAIS',
+      reference: '31,00',
+      type: 'addition',
+      amount: 2500
+    }
+  ]);
+
+  // Input state for adding a rubric row manually
+  const [itemInput, setItemInput] = useState({
+    code: '',
+    description: '',
+    reference: '',
+    type: 'addition' as 'addition' | 'deduction' | 'info',
+    amount: ''
+  });
+  const [selectedCatalogCode, setSelectedCatalogCode] = useState('');
+
   const [isParsingAI, setIsParsingAI] = useState(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const aiFileInputRef = useRef<HTMLInputElement>(null);
@@ -196,6 +249,182 @@ export default function MySalarySlips() {
   const [adminModalTab, setAdminModalTab] = useState<'form' | 'preview'>('form');
   const [slipPlantoes, setSlipPlantoes] = useState<number>(15);
   const [empAttendanceForSlip, setEmpAttendanceForSlip] = useState<any[]>([]);
+
+  // Real-time synchronization of custom rubrics from Firestore
+  useEffect(() => {
+    if (!isAdmin) return;
+    const unsubRubrics = onSnapshot(collection(db, 'payrollRubrics'), (snap) => {
+      const loaded = snap.docs.map(d => ({ id: d.id, ...d.data() } as PayrollRubric));
+      setCustomRubrics(loaded);
+    }, (err) => {
+      console.warn('Could not load custom rubrics from firestore:', err);
+    });
+    return () => unsubRubrics();
+  }, [isAdmin]);
+
+  // Combined Catalog: Standard system rubrics + custom company rubrics
+  const allRubrics: PayrollRubric[] = [
+    ...DEFAULT_PAYROLL_RUBRICS,
+    ...customRubrics.filter(cr => !DEFAULT_PAYROLL_RUBRICS.some(dr => dr.code === cr.code))
+  ];
+
+  // Save a new rubric to the catalog in Firestore
+  const handleSaveCustomRubric = async () => {
+    if (!newRubricForm.code.trim() || !newRubricForm.name.trim()) {
+      alert('Por favor informe o Código e a Descrição da rubrica.');
+      return;
+    }
+    setSavingRubric(true);
+    try {
+      await addDoc(collection(db, 'payrollRubrics'), {
+        code: newRubricForm.code.trim().toUpperCase(),
+        name: newRubricForm.name.trim().toUpperCase(),
+        type: newRubricForm.type,
+        defaultReference: newRubricForm.defaultReference?.trim() || '-',
+        createdAt: new Date().toISOString()
+      });
+      setNewRubricForm({ code: '', name: '', type: 'addition', defaultReference: '' });
+      alert('Rubrica cadastrada com sucesso no catálogo!');
+    } catch (err: any) {
+      alert('Erro ao salvar rubrica: ' + (err.message || err));
+    } finally {
+      setSavingRubric(false);
+    }
+  };
+
+  // Delete a custom rubric from the catalog
+  const handleDeleteCustomRubric = async (id?: string) => {
+    if (!id) return;
+    if (!confirm('Deseja excluir esta rubrica personalizada do catálogo?')) return;
+    try {
+      await deleteDoc(doc(db, 'payrollRubrics', id));
+    } catch (err: any) {
+      alert('Erro ao excluir rubrica: ' + (err.message || err));
+    }
+  };
+
+  // Select a rubric from dropdown to auto-fill code, description and reference
+  const handleSelectCatalogRubric = (val: string) => {
+    setSelectedCatalogCode(val);
+    if (!val) return;
+    let found: any = undefined;
+    if (val.includes(':::')) {
+      const [c, t] = val.split(':::');
+      found = allRubrics.find(r => r.code === c && r.type === t);
+    }
+    if (!found) {
+      found = allRubrics.find(r => r.code === val);
+    }
+    if (found) {
+      setItemInput(prev => ({
+        ...prev,
+        code: found.code,
+        description: found.name,
+        type: found.type,
+        reference: found.defaultReference || '-'
+      }));
+    }
+  };
+
+  // Add line item to current slip
+  const handleAddLineItem = () => {
+    const amountNum = Number(itemInput.amount);
+    if (!itemInput.description.trim()) {
+      alert('Informe a descrição da rubrica.');
+      return;
+    }
+    const isInfoItem = itemInput.type === 'info' || itemInput.code.trim() === '9382' || itemInput.code.trim() === '9392';
+    if (!isInfoItem && (isNaN(amountNum) || amountNum <= 0)) {
+      alert('Informe um valor válido em R$ maior que zero.');
+      return;
+    }
+
+    const byCode = itemInput.code.trim() ? allRubrics.find(r => r.code === itemInput.code.trim()) : null;
+    const matched = matchRubricDetails(itemInput.description, itemInput.type, allRubrics);
+    const codeToUse = itemInput.code.trim() || byCode?.code || matched.code;
+    const refToUse = itemInput.reference.trim() || byCode?.defaultReference || matched.reference || '-';
+    const typeToUse = isInfoItem ? 'info' : (byCode?.type || itemInput.type);
+    const amountToUse = isInfoItem ? 0 : amountNum;
+
+    const newItem: SalarySlipLineItem = {
+      id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      code: codeToUse,
+      description: itemInput.description.trim().toUpperCase(),
+      reference: refToUse,
+      type: typeToUse,
+      amount: amountToUse
+    };
+
+    setNewSlipItems(prev => {
+      // If adding base salary, replace existing base salary item
+      if (newItem.code === '8781' || newItem.description.toUpperCase().includes('DIAS NORMAIS') || newItem.description.toUpperCase().includes('SALÁRIO BASE')) {
+        setNewSlipForm(f => ({ ...f, baseSalary: newItem.amount }));
+        const filtered = prev.filter(it => it.code !== '8781' && !it.description.toUpperCase().includes('DIAS NORMAIS') && !it.description.toUpperCase().includes('SALÁRIO BASE'));
+        return [newItem, ...filtered];
+      }
+      return [...prev, newItem];
+    });
+
+    // Clear input
+    setItemInput({
+      code: '',
+      description: '',
+      reference: '',
+      type: 'addition',
+      amount: ''
+    });
+    setSelectedCatalogCode('');
+  };
+
+  // Remove line item
+  const handleRemoveLineItem = (index: number) => {
+    setNewSlipItems(prev => prev.filter((_, i) => i !== index));
+  };
+
+  // Update line item inline
+  const handleUpdateLineItem = (index: number, field: keyof SalarySlipLineItem, val: any) => {
+    setNewSlipItems(prev => {
+      const updated = prev.map((item, i) => {
+        if (i !== index) return item;
+        return { ...item, [field]: val };
+      });
+      // Sincroniza salário base automaticamente sempre que qualquer item de salário base ou 8781 for alterado
+      const baseItem = updated.find(it => it.code === '8781' || it.description.toUpperCase().includes('DIAS NORMAIS') || it.description.toUpperCase().includes('SALÁRIO BASE'));
+      if (baseItem && Number(baseItem.amount) > 0) {
+        setNewSlipForm(f => ({ ...f, baseSalary: Number(baseItem.amount) }));
+      }
+      return updated;
+    });
+  };
+
+  // Automatically recalculate and inject/update INSS (998) and IRRF (508) in newSlipItems
+  const handleAutoRecalculateTaxes = () => {
+    const totals = calculatePayrollTotals(newSlipItems, newSlipForm.baseSalary);
+    setNewSlipItems(prev => {
+      let updated = prev.filter(it => it.code !== '998' && it.code !== '508' && !it.description.includes('INSS') && !it.description.includes('IRRF'));
+      if (totals.inssValorCalculado > 0) {
+        updated.push({
+          id: `item-inss-${Date.now()}`,
+          code: '998',
+          description: 'INSS - PREVIDÊNCIA SOCIAL (CLT)',
+          reference: calculateInss(totals.salContrInss).effectiveRate,
+          type: 'deduction',
+          amount: totals.inssValorCalculado
+        });
+      }
+      if (totals.irrfValorCalculado > 0) {
+        updated.push({
+          id: `item-irrf-${Date.now()}`,
+          code: '508',
+          description: 'IRRF - IMPOSTO DE RENDA RETIDO NA FONTE',
+          reference: totals.faixaIrrf,
+          type: 'deduction',
+          amount: totals.irrfValorCalculado
+        });
+      }
+      return updated;
+    });
+  };
 
   useEffect(() => {
     if (!isAdmin || !selectedAdminEmployee?.id) {
@@ -209,6 +438,40 @@ export default function MySalarySlips() {
     return () => unsubAtt();
   }, [isAdmin, selectedAdminEmployee]);
 
+  // Sync employee salary to base salary item when employee changes
+  useEffect(() => {
+    if (selectedAdminEmployee) {
+      const empSalary = Number(selectedAdminEmployee.salary) || 2500;
+      setNewSlipForm(prev => ({
+        ...prev,
+        userId: selectedAdminEmployee.id,
+        baseSalary: empSalary
+      }));
+      setNewSlipItems(prev => {
+        const hasBase = prev.some(it => it.code === '8781' || it.description.toUpperCase().includes('DIAS NORMAIS') || it.description.toUpperCase().includes('SALÁRIO BASE'));
+        if (hasBase) {
+          return prev.map(it => {
+            if (it.code === '8781' || it.description.toUpperCase().includes('DIAS NORMAIS') || it.description.toUpperCase().includes('SALÁRIO BASE')) {
+              return { ...it, amount: empSalary };
+            }
+            return it;
+          });
+        }
+        return [
+          {
+            id: `item-base-${Date.now()}`,
+            code: '8781',
+            description: 'DIAS NORMAIS',
+            reference: '31,00',
+            type: 'addition',
+            amount: empSalary
+          },
+          ...prev
+        ];
+      });
+    }
+  }, [selectedAdminEmployee]);
+
   const detectedSlipShifts = contarPlantoesTrabalhadosNoMes(
     empAttendanceForSlip,
     selectedAdminEmployee?.id || '',
@@ -219,19 +482,34 @@ export default function MySalarySlips() {
   const applyValeDiscountToSlip = (plantoesCount: number) => {
     const validShifts = Math.max(0, Math.floor(Number(plantoesCount) || 0));
     setSlipPlantoes(validShifts);
-    const calc = calcularPontoEValeAutomatico(validShifts);
-    const discountAmount = Number(calc.descontoNoSueldo);
-    const label = `DESC. VALE REFEIÇÃO 1% (${validShifts} PLANTÕES)`;
+    const label = `VALE ALIMENTAÇÃO`;
+    const refText = validShifts > 0 ? `${validShifts},00` : '15,00';
+
+    // 9382 fica exclusivamente em referência (tipo 'info', amount: 0, sem vencimento e sem desconto)
+    setNewSlipItems(prev => {
+      const filtered = prev.filter(
+        it => it.code !== '9382' && it.code !== '9392' && !it.description.toUpperCase().includes('VALE REFEI') && !it.description.toUpperCase().includes('VALE ALIMENTA')
+      );
+      return [
+        ...filtered,
+        {
+          id: `item-vr-ref-${Date.now()}`,
+          code: '9382',
+          description: label,
+          reference: refText,
+          type: 'info',
+          amount: 0
+        }
+      ];
+    });
 
     setNewSlipForm(prev => {
       const filteredDeductions = (prev.deductions || []).filter(
-        d => !d.name.toUpperCase().includes('VALE REFEI') && !d.name.toUpperCase().includes('VALE ALIMENTA')
+        (d: any) => !d.name.toUpperCase().includes('VALE REFEI') && !d.name.toUpperCase().includes('VALE ALIMENTA') && d.code !== '9382'
       );
       return {
         ...prev,
-        deductions: discountAmount > 0
-          ? [...filteredDeductions, { name: label, amount: discountAmount }]
-          : filteredDeductions
+        deductions: filteredDeductions
       };
     });
   };
@@ -552,6 +830,7 @@ export default function MySalarySlips() {
         adminSignedAt: new Date().toISOString(),
         adminSignerIp: dummyIp,
         adminSignerUserAgent: navigator.userAgent || 'App-Movel-Webview',
+        companyCopySaved: true,
       } : {
         signed: true,
         signatureDataUrl: downloadURL,
@@ -560,6 +839,11 @@ export default function MySalarySlips() {
         signedAt: new Date().toISOString(),
         signerIp: dummyIp,
         signerUserAgent: navigator.userAgent || 'App-Movel-Webview',
+        sentToCompany: true,
+        sentToCompanyAt: new Date().toISOString(),
+        employeeCopySaved: true,
+        employeeCopySavedAt: new Date().toISOString(),
+        hasEmployeeCopy: true,
       };
 
       await updateDoc(doc(db, 'salarySlips', slipId), payload);
@@ -581,8 +865,8 @@ export default function MySalarySlips() {
       } else {
         await createNotification(
           user!.uid,
-          'Holerite Assinado',
-          `Seu Holerite do mês de ${months[selectedSlip.month - 1]}/${selectedSlip.year} foi assinado com sucesso. Uma cópia segura foi enviada para a Administração.`,
+          'Holerite Assinado e Salvo no App',
+          `Seu Holerite do mês de ${months[selectedSlip.month - 1]}/${selectedSlip.year} foi assinado e enviado para a empresa com sucesso! Uma cópia oficial com sua assinatura já está salva no seu aplicativo.`,
           'success',
           'payroll'
         );
@@ -592,7 +876,7 @@ export default function MySalarySlips() {
       if (isAdminSign) {
         alert('Holerite homologado com sucesso!');
       } else {
-        alert('Holerite assinado digitalmente e reenviado ao Administrador com sucesso!');
+        alert('Holerite assinado digitalmente e enviado para a empresa com sucesso! Uma cópia oficial foi salva e arquivada diretamente no seu aplicativo.');
       }
     } catch (err) {
       alert('Erro ao assinar holerite: ' + err);
@@ -641,8 +925,7 @@ export default function MySalarySlips() {
     if (norm.includes('BASE') || norm.includes('CONTRATUAL') || norm.includes('DIAS NORMAIS') || norm === 'SALÁRIO BASE') return '8781';
     if (norm.includes('REFLEXO') || norm.includes('DSR')) return '8125';
     if (norm.includes('EXTRA') || norm.includes('HORAS EXTRAS')) return '150';
-    if (norm.includes('VALE ALIMENTAÇÃO') || norm.includes('VALE ALIMENTACAO') || norm.includes('VALE REFEIÇÃO') || norm.includes('VALE REFEICAO')) {
-      if (norm.includes('DESC') || norm.includes('DESCONTO')) return '201';
+    if (norm.includes('VALE ALIMENTAÇÃO') || norm.includes('VALE ALIMENTACAO') || norm.includes('VALE REFEIÇÃO') || norm.includes('VALE REFEICAO') || norm.includes('9382') || norm.includes('9392')) {
       return '9382';
     }
     if (norm.includes('SEGURO') || norm.includes('VIDA')) return '203';
@@ -659,55 +942,36 @@ export default function MySalarySlips() {
   };
 
   const getPreviewCalc = () => {
-    const baseSalary = Number(newSlipForm.baseSalary || 0);
     const isVacation = newSlipForm.documentType === 'vacation';
-    const autoCalculateTaxes = newSlipForm.autoCalculateTaxes !== false;
     
     if (isVacation) {
-      const vacationSalary = Number(newSlipForm.vacationSalary || baseSalary);
+      const vacationSalary = Number(newSlipForm.vacationSalary || newSlipForm.baseSalary || 2500);
       const constThird = newSlipForm.hasConstitutionalThird ? Number((vacationSalary / 3).toFixed(2)) : 0;
+      const extraAdditions = newSlipItems.filter(it => it.type === 'addition' && it.code !== '0220' && it.code !== '0221');
+      const extraAdditionsSum = extraAdditions.reduce((acc, cur) => acc + cur.amount, 0);
+      const totalAdditions = vacationSalary + constThird + extraAdditionsSum;
       
-      const customAdditionsSum = (newSlipForm.additions || []).reduce((acc: number, cur: any) => acc + cur.amount, 0);
-      const valBaseDeductions = vacationSalary + constThird + customAdditionsSum;
-      
-      const taxes: any[] = [];
-      const discounts: any[] = [];
+      const inss = Number(calculateInss(totalAdditions).inss.toFixed(2));
+      const irpf = Number(calculateIrrf(Math.max(0, totalAdditions - inss)).irrf.toFixed(2));
 
-      if (autoCalculateTaxes) {
-        const { inss, irpf } = autoCalculateDeductions(valBaseDeductions);
-        taxes.push({ name: 'INSS s/ Férias', amount: inss, type: 'deduction' });
-        taxes.push({ name: 'IRPF s/ Férias', amount: irpf, type: 'deduction' });
+      const taxes: any[] = [
+        { name: 'INSS s/ Férias', amount: inss, type: 'deduction', code: '0910', reference: calculateInss(totalAdditions).effectiveRate },
+        ...(irpf > 0 ? [{ name: 'IRPF s/ Férias', amount: irpf, type: 'deduction', code: '0514', reference: calculateIrrf(Math.max(0, totalAdditions - inss)).faixa }] : [])
+      ];
+      extraAdditions.forEach(a => taxes.push({ name: a.description, amount: a.amount, type: 'addition', code: a.code, reference: a.reference }));
 
-        (newSlipForm.additions || []).forEach(a => {
-          taxes.push({ name: a.name, amount: a.amount, type: 'addition' });
-        });
+      const discounts = newSlipItems.filter(it => it.type === 'deduction' && it.code !== '0910' && it.code !== '0514');
+      discounts.forEach(d => taxes.push({ name: d.description, amount: d.amount, type: 'deduction', code: d.code, reference: d.reference }));
 
-        (newSlipForm.deductions || []).forEach(d => {
-          discounts.push({ name: d.name, amount: d.amount });
-        });
-      } else {
-        (newSlipForm.additions || []).forEach(a => {
-          taxes.push({ name: a.name, amount: a.amount, type: 'addition' });
-        });
-
-        (newSlipForm.deductions || []).forEach(d => {
-          taxes.push({ name: d.name, amount: d.amount, type: 'deduction' });
-        });
-      }
-
-      const totalAdditions = vacationSalary + constThird + customAdditionsSum;
-      const totalDeductions = autoCalculateTaxes 
-        ? (taxes.filter(t => t.type === 'deduction').reduce((acc, cur) => acc + cur.amount, 0) + discounts.reduce((acc, cur) => acc + cur.amount, 0))
-        : (newSlipForm.deductions || []).reduce((acc: number, cur: any) => acc + cur.amount, 0);
-      
+      const totalDeductions = inss + (irpf > 0 ? irpf : 0) + discounts.reduce((acc, cur) => acc + cur.amount, 0);
       const netSalary = Math.max(0, totalAdditions - totalDeductions);
 
       return {
-        baseSalary,
+        baseSalary: vacationSalary,
         vacationSalary,
         constThird,
         taxes,
-        discounts,
+        discounts: discounts.map(d => ({ name: d.description, amount: d.amount })),
         totalAdditions,
         totalDeductions,
         netSalary,
@@ -716,48 +980,33 @@ export default function MySalarySlips() {
         vacationEnd: newSlipForm.vacationEnd,
         acquisitionStart: newSlipForm.acquisitionStart,
         acquisitionEnd: newSlipForm.acquisitionEnd,
-        hasConstitutionalThird: newSlipForm.hasConstitutionalThird
+        hasConstitutionalThird: newSlipForm.hasConstitutionalThird,
+        salContrInss: totalAdditions,
+        baseFgts: totalAdditions,
+        fgtsMes: Number((totalAdditions * 0.08).toFixed(2)),
+        baseIrrf: Math.max(0, totalAdditions - inss),
+        faixaIrrf: calculateIrrf(Math.max(0, totalAdditions - inss)).faixa,
+        items: newSlipItems
       };
     } else {
-      const taxes: any[] = [];
-      const discounts: any[] = [];
-
-      if (autoCalculateTaxes) {
-        const { inss, irpf } = autoCalculateDeductions(baseSalary);
-        taxes.push({ name: 'INSS Desconto CLT', amount: inss, type: 'deduction' });
-        taxes.push({ name: 'IRPF Simplificado', amount: irpf, type: 'deduction' });
-
-        (newSlipForm.additions || []).forEach(a => {
-          taxes.push({ name: a.name, amount: a.amount, type: 'addition' });
-        });
-
-        (newSlipForm.deductions || []).forEach(d => {
-          discounts.push({ name: d.name, amount: d.amount });
-        });
-      } else {
-        (newSlipForm.additions || []).forEach(a => {
-          taxes.push({ name: a.name, amount: a.amount, type: 'addition' });
-        });
-
-        (newSlipForm.deductions || []).forEach(d => {
-          taxes.push({ name: d.name, amount: d.amount, type: 'deduction' });
-        });
-      }
-
-      const totalAdditions = baseSalary + (newSlipForm.additions || []).reduce((acc: number, cur: any) => acc + cur.amount, 0);
-      const totalDeductions = autoCalculateTaxes
-        ? (taxes.filter(t => t.type === 'deduction').reduce((acc, cur) => acc + cur.amount, 0) + discounts.reduce((acc, cur) => acc + cur.amount, 0))
-        : (newSlipForm.deductions || []).reduce((acc: number, cur: any) => acc + cur.amount, 0);
-      const netSalary = Math.max(0, totalAdditions - totalDeductions);
-
+      const totals = calculatePayrollTotals(newSlipItems, newSlipForm.baseSalary);
       return {
-        baseSalary,
-        taxes,
-        discounts,
-        totalAdditions,
-        totalDeductions,
-        netSalary,
-        isVacation: false
+        ...totals,
+        taxes: newSlipItems.map(it => ({
+          name: it.description,
+          amount: it.amount,
+          type: it.type,
+          code: it.code,
+          reference: it.reference
+        })),
+        discounts: newSlipItems.filter(it => it.type === 'deduction').map(it => ({
+          name: it.description,
+          amount: it.amount,
+          code: it.code,
+          reference: it.reference
+        })),
+        isVacation: false,
+        items: newSlipItems
       };
     }
   };
@@ -859,12 +1108,52 @@ export default function MySalarySlips() {
         setAiSuccessMessage(`Dados extraídos com sucesso! Por favor, selecione o colaborador correspondente.`);
       }
 
+      // Populate structured newSlipItems with extracted items
+      const parsedItems: SalarySlipLineItem[] = [];
+      const baseSalaryDetected = Number(data.baseSalary) || newSlipForm.baseSalary || 2500;
+      
+      parsedItems.push({
+        id: `item-ai-base-${Date.now()}`,
+        code: '8781',
+        description: 'DIAS NORMAIS',
+        reference: '31,00',
+        type: 'addition',
+        amount: baseSalaryDetected
+      });
+
+      (data.additions || []).forEach((a: any, idx: number) => {
+        const matched = matchRubricDetails(a.name || a.description, 'addition', allRubrics);
+        parsedItems.push({
+          id: `item-ai-add-${idx}-${Date.now()}`,
+          code: a.code || matched.code,
+          description: (a.name || a.description || matched.description).toUpperCase(),
+          reference: a.reference || matched.reference,
+          type: 'addition',
+          amount: Number(a.amount) || 0
+        });
+      });
+
+      (data.deductions || []).forEach((d: any, idx: number) => {
+        const matched = matchRubricDetails(d.name || d.description, 'deduction', allRubrics);
+        parsedItems.push({
+          id: `item-ai-ded-${idx}-${Date.now()}`,
+          code: d.code || matched.code,
+          description: (d.name || d.description || matched.description).toUpperCase(),
+          reference: d.reference || matched.reference,
+          type: 'deduction',
+          amount: Number(d.amount) || 0
+        });
+      });
+
+      setNewSlipItems(parsedItems);
+      setSlipCreationMode('upload');
+
       setNewSlipForm(prev => ({
         ...prev,
         userId: targetUserId,
         month: data.month || prev.month,
         year: data.year || prev.year,
-        baseSalary: data.baseSalary || prev.baseSalary,
+        baseSalary: baseSalaryDetected,
         additions: (data.additions || []).map((a: any) => ({ name: a.name, amount: Number(a.amount) })),
         deductions: (data.deductions || []).map((d: any) => ({ name: d.name, amount: Number(d.amount) })),
         autoCalculateTaxes: false
@@ -880,17 +1169,18 @@ export default function MySalarySlips() {
 
   const handleAddSlipItem = () => {
     if (!tempItem.name || tempItem.amount <= 0) return;
-    if (tempItem.type === 'addition') {
-      setNewSlipForm({
-        ...newSlipForm,
-        additions: [...newSlipForm.additions, { name: tempItem.name, amount: tempItem.amount }]
-      });
-    } else {
-      setNewSlipForm({
-        ...newSlipForm,
-        deductions: [...newSlipForm.deductions, { name: tempItem.name, amount: tempItem.amount }]
-      });
-    }
+    const matched = matchRubricDetails(tempItem.name, tempItem.type as any, allRubrics);
+    setNewSlipItems(prev => [
+      ...prev,
+      {
+        id: `item-${Date.now()}`,
+        code: matched.code,
+        description: tempItem.name.trim().toUpperCase(),
+        reference: matched.reference,
+        type: tempItem.type as 'addition' | 'deduction',
+        amount: tempItem.amount
+      }
+    ]);
     setTempItem({ name: '', amount: 0, type: tempItem.type });
   };
 
@@ -917,59 +1207,56 @@ export default function MySalarySlips() {
 
     try {
       const isVacation = newSlipForm.documentType === 'vacation';
-      const autoCalculateTaxes = newSlipForm.autoCalculateTaxes !== false;
-      let payloadTaxes: TaxItem[] = [];
-      let payloadDiscounts: DiscountItem[] = [];
-      let netSalary = 0;
       let slipData: any = {};
 
       if (isVacation) {
-        const vacationSalary = Number(newSlipForm.vacationSalary || newSlipForm.baseSalary);
+        const vacationSalary = Number(newSlipForm.vacationSalary || newSlipForm.baseSalary || 2500);
         const constThird = newSlipForm.hasConstitutionalThird ? Number((vacationSalary / 3).toFixed(2)) : 0;
-        const customAdditionsSum = (newSlipForm.additions || []).reduce((acc, cur) => acc + cur.amount, 0);
+        const extraAdditions = newSlipItems.filter(it => it.type === 'addition' && it.code !== '0220' && it.code !== '0221');
+        const totalAdditions = vacationSalary + constThird + extraAdditions.reduce((acc, cur) => acc + cur.amount, 0);
 
-        if (autoCalculateTaxes) {
-          const valBaseDeductions = vacationSalary + constThird + customAdditionsSum;
-          const { inss, irpf } = autoCalculateDeductions(valBaseDeductions);
+        const inss = Number(calculateInss(totalAdditions).inss.toFixed(2));
+        const irpf = Number(calculateIrrf(Math.max(0, totalAdditions - inss)).irrf.toFixed(2));
 
-          payloadTaxes = [
-            { name: 'INSS s/ Férias', amount: inss, type: 'deduction' },
-            { name: 'IRPF s/ Férias', amount: irpf, type: 'deduction' }
-          ];
+        const vacationItems: SalarySlipLineItem[] = [
+          { id: 'vac-1', code: '0220', description: 'VALOR DAS FÉRIAS (GOZO)', reference: '30 Dias', type: 'addition', amount: vacationSalary },
+          ...(newSlipForm.hasConstitutionalThird ? [{ id: 'vac-2', code: '0221', description: 'TERÇO CONSTITUCIONAL DE FÉRIAS (1/3)', reference: '33,33%', type: 'addition' as const, amount: constThird }] : []),
+          ...extraAdditions,
+          { id: 'vac-inss', code: '0910', description: 'INSS S/ FÉRIAS', reference: calculateInss(totalAdditions).effectiveRate, type: 'deduction' as const, amount: inss },
+          ...(irpf > 0 ? [{ id: 'vac-irpf', code: '0514', description: 'IRPF S/ FÉRIAS', reference: calculateIrrf(Math.max(0, totalAdditions - inss)).faixa, type: 'deduction' as const, amount: irpf }] : []),
+          ...newSlipItems.filter(it => it.type === 'deduction' && it.code !== '0910' && it.code !== '0514')
+        ];
 
-          newSlipForm.additions.forEach(a => {
-            payloadTaxes.push({ name: a.name, amount: a.amount, type: 'addition' });
-          });
-
-          newSlipForm.deductions.forEach(d => {
-            payloadDiscounts.push({ name: d.name, amount: d.amount });
-          });
-
-          const totalAdditions = vacationSalary + constThird + customAdditionsSum;
-          const totalDeductions = inss + irpf + newSlipForm.deductions.reduce((acc, cur) => acc + cur.amount, 0);
-          netSalary = Math.max(0, totalAdditions - totalDeductions);
-        } else {
-          newSlipForm.additions.forEach(a => {
-            payloadTaxes.push({ name: a.name, amount: a.amount, type: 'addition' });
-          });
-
-          newSlipForm.deductions.forEach(d => {
-            payloadTaxes.push({ name: d.name, amount: d.amount, type: 'deduction' });
-          });
-
-          const totalAdditions = vacationSalary + constThird + customAdditionsSum;
-          const totalDeductions = newSlipForm.deductions.reduce((acc, cur) => acc + cur.amount, 0);
-          netSalary = Math.max(0, totalAdditions - totalDeductions);
-        }
+        const totalDeductions = vacationItems.filter(it => it.type === 'deduction').reduce((acc, cur) => acc + cur.amount, 0);
+        const netSalary = Math.max(0, totalAdditions - totalDeductions);
 
         slipData = {
           userId: selectedAdminEmployee.id,
           month: Number(newSlipForm.month),
           year: Number(newSlipForm.year),
-          baseSalary: Number(newSlipForm.baseSalary),
-          taxes: payloadTaxes,
-          discounts: payloadDiscounts,
+          baseSalary: vacationSalary,
+          totalAdditions: Number(totalAdditions.toFixed(2)),
+          totalDeductions: Number(totalDeductions.toFixed(2)),
           netSalary: Number(netSalary.toFixed(2)),
+          salContrInss: Number(totalAdditions.toFixed(2)),
+          baseFgts: Number(totalAdditions.toFixed(2)),
+          fgtsMes: Number((totalAdditions * 0.08).toFixed(2)),
+          baseIrrf: Number(Math.max(0, totalAdditions - inss).toFixed(2)),
+          faixaIrrf: calculateIrrf(Math.max(0, totalAdditions - inss)).faixa,
+          items: vacationItems,
+          taxes: vacationItems.map(it => ({
+            name: it.description,
+            amount: it.amount,
+            type: it.type,
+            code: it.code,
+            reference: it.reference
+          })),
+          discounts: vacationItems.filter(it => it.type === 'deduction').map(it => ({
+            name: it.description,
+            amount: it.amount,
+            code: it.code,
+            reference: it.reference
+          })),
           signed: false,
           issuedAt: new Date().toISOString(),
           documentType: 'vacation',
@@ -981,50 +1268,42 @@ export default function MySalarySlips() {
           hasConstitutionalThird: newSlipForm.hasConstitutionalThird
         };
       } else {
-        if (autoCalculateTaxes) {
-          const { inss, irpf } = autoCalculateDeductions(newSlipForm.baseSalary);
-          
-          payloadTaxes = [
-            { name: 'INSS Desconto CLT', amount: inss, type: 'deduction' },
-            { name: 'IRPF Simplificado', amount: irpf, type: 'deduction' }
-          ];
-
-          newSlipForm.additions.forEach(a => {
-            payloadTaxes.push({ name: a.name, amount: a.amount, type: 'addition' });
-          });
-
-          newSlipForm.deductions.forEach(d => {
-            payloadDiscounts.push({ name: d.name, amount: d.amount });
-          });
-
-          const totalAdditions = newSlipForm.baseSalary + newSlipForm.additions.reduce((acc, cur) => acc + cur.amount, 0);
-          const totalDeductions = inss + irpf + newSlipForm.deductions.reduce((acc, cur) => acc + cur.amount, 0);
-          netSalary = Math.max(0, totalAdditions - totalDeductions);
-        } else {
-          newSlipForm.additions.forEach(a => {
-            payloadTaxes.push({ name: a.name, amount: a.amount, type: 'addition' });
-          });
-
-          // Custom deductions go directly as deduction tax lines
-          newSlipForm.deductions.forEach(d => {
-            payloadTaxes.push({ name: d.name, amount: d.amount, type: 'deduction' });
-          });
-
-          const totalAdditions = newSlipForm.baseSalary + newSlipForm.additions.reduce((acc, cur) => acc + cur.amount, 0);
-          const totalDeductions = newSlipForm.deductions.reduce((acc, cur) => acc + cur.amount, 0);
-          netSalary = Math.max(0, totalAdditions - totalDeductions);
-        }
+        const totals = calculatePayrollTotals(newSlipItems, newSlipForm.baseSalary);
 
         slipData = {
           userId: selectedAdminEmployee.id,
           month: Number(newSlipForm.month),
           year: Number(newSlipForm.year),
-          baseSalary: Number(newSlipForm.baseSalary),
-          taxes: payloadTaxes,
-          discounts: payloadDiscounts,
-          netSalary: Number(netSalary.toFixed(2)),
+          baseSalary: totals.baseSalary,
+          totalAdditions: totals.totalAdditions,
+          totalDeductions: totals.totalDeductions,
+          netSalary: totals.netSalary,
+          salContrInss: totals.salContrInss,
+          baseFgts: totals.baseFgts,
+          fgtsMes: totals.fgtsMes,
+          baseIrrf: totals.baseIrrf,
+          faixaIrrf: totals.faixaIrrf,
+          items: newSlipItems,
+          taxes: newSlipItems.map(it => ({
+            name: it.description,
+            amount: it.amount,
+            type: it.type,
+            code: it.code,
+            reference: it.reference
+          })),
+          discounts: newSlipItems.filter(it => it.type === 'deduction' && it.code !== '9382' && it.code !== '9392').map(it => ({
+            name: it.description,
+            amount: it.amount,
+            code: it.code,
+            reference: it.reference
+          })),
           signed: false,
           issuedAt: new Date().toISOString(),
+          sentToCompanyAt: new Date().toISOString(),
+          sentToEmployeeAt: new Date().toISOString(),
+          companyCopySaved: true,
+          employeeCopySaved: true,
+          hasEmployeeCopy: true,
           documentType: 'salary'
         };
       }
@@ -1035,7 +1314,7 @@ export default function MySalarySlips() {
       const notificationTitle = isVacation ? 'Férias Enviadas pela Administração' : 'Novo Holerite Enviado';
       const notificationMsg = isVacation
         ? `A Administração enviou de forma digital seu Recibo e Aviso de Férias (${newSlipForm.vacationStart} a ${newSlipForm.vacationEnd}). Por favor, acesse para assinar.`
-        : `A Administração enviou o seu holerite do mês de ${months[slipData.month - 1]}/${slipData.year}. Acesse a aba Holerites para conferir e assinar.`;
+        : `A Administração enviou o seu holerite do mês de ${months[slipData.month - 1]}/${slipData.year}. Uma cópia oficial já está salva no seu app para conferir e assinar.`;
 
       await createNotification(
         selectedAdminEmployee.id,
@@ -1045,7 +1324,7 @@ export default function MySalarySlips() {
         'payroll'
       );
 
-      alert(isVacation ? 'Documentações de Férias criadas e enviadas ao colaborador com sucesso!' : 'Holerite criado e enviado com sucesso ao colaborador!');
+      alert(isVacation ? 'Documentações de Férias criadas e enviadas ao colaborador com sucesso! A via da empresa foi registrada e uma cópia oficial foi salva com sucesso no aplicativo do colaborador.' : 'Holerite despachado com sucesso! A via da empresa foi registrada e uma cópia oficial foi salva diretamente no aplicativo do colaborador.');
       setShowAddSlipModal(false);
       fetchData(); // Refresh list
     } catch (err) {
@@ -1557,12 +1836,22 @@ export default function MySalarySlips() {
                   <div className="bg-white rounded-3xl border border-slate-100 shadow-sm p-6 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
                     <div>
                       <h4 className="font-extrabold text-slate-800 text-sm">Holerite {months[selectedSlip.month - 1]} / {selectedSlip.year}</h4>
-                      <div className="flex items-center gap-2 mt-1">
+                      <div className="flex flex-wrap items-center gap-1.5 mt-1">
                         <span className={cn(
                           "px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest",
                           selectedSlip.signed ? "bg-emerald-50 text-emerald-600" : "bg-orange-50 text-orange-600"
                         )}>
                           {selectedSlip.signed ? 'ASSINADO' : 'PENDENTE DE ASSINATURA'}
+                        </span>
+
+                        <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest bg-blue-50 text-blue-700 flex items-center gap-1">
+                          <CheckCircle2 className="w-2.5 h-2.5 text-blue-600" />
+                          Cópia do Colaborador Salva no App
+                        </span>
+
+                        <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-650 flex items-center gap-1">
+                          <ShieldCheck className="w-2.5 h-2.5 text-slate-500" />
+                          Via da Empresa
                         </span>
                         
                         {!isAdmin && folders.length > 0 && (
@@ -1645,13 +1934,34 @@ export default function MySalarySlips() {
                       >
                         {/* THE OFFICIAL LOOKING BRAZILIAN HOLERITE BLOCK */}
                         {(() => {
-                          const totalVencimentos = selectedSlip.baseSalary + (selectedSlip.taxes?.filter((t: any) => t.type === 'addition').reduce((acc: number, cur: any) => acc + cur.amount, 0) || 0);
-                          const inssAmount = selectedSlip.taxes?.filter((t: any) => t.type === 'deduction' || !t.type).find((t: any) => t.name.toUpperCase().includes('INSS'))?.amount || 0;
-                          const irpfAmount = selectedSlip.taxes?.filter((t: any) => t.type === 'deduction' || !t.type).find((t: any) => t.name.toUpperCase().includes('IRPF'))?.amount || 0;
-                          const totalDescontos = (selectedSlip.taxes?.filter((t: any) => t.type === 'deduction' || !t.type).reduce((acc: number, cur: any) => acc + cur.amount, 0) || 0) + (selectedSlip.discounts?.reduce((acc: number, cur: any) => acc + cur.amount, 0) || 0);
-                          const fgtsBase = totalVencimentos;
-                          const fgtsAmount = fgtsBase * 0.08;
-                          const irpfBase = Math.max(0, totalVencimentos - inssAmount);
+                          const totalVencimentosFallback = selectedSlip.baseSalary + (selectedSlip.taxes?.filter((t: any) => t.type === 'addition').reduce((acc: number, cur: any) => acc + cur.amount, 0) || 0);
+                          const inssAmountFallback = selectedSlip.taxes?.filter((t: any) => t.type === 'deduction' || !t.type).find((t: any) => t.name.toUpperCase().includes('INSS'))?.amount || 0;
+                          const irpfAmountFallback = selectedSlip.taxes?.filter((t: any) => t.type === 'deduction' || !t.type).find((t: any) => t.name.toUpperCase().includes('IRPF'))?.amount || 0;
+                          const totalDescontosFallback = (selectedSlip.taxes?.filter((t: any) => t.type === 'deduction' || !t.type).reduce((acc: number, cur: any) => acc + cur.amount, 0) || 0) + (selectedSlip.discounts?.reduce((acc: number, cur: any) => acc + cur.amount, 0) || 0);
+
+                          const hasStructuredItems = Array.isArray(selectedSlip.items) && selectedSlip.items.length > 0;
+                          const slipCalculations = hasStructuredItems
+                            ? calculatePayrollTotals(selectedSlip.items, selectedSlip.baseSalary)
+                            : {
+                                baseSalary: selectedSlip.baseSalary,
+                                totalAdditions: selectedSlip.totalAdditions || totalVencimentosFallback,
+                                totalDeductions: selectedSlip.totalDeductions || totalDescontosFallback,
+                                netSalary: selectedSlip.netSalary,
+                                salContrInss: selectedSlip.salContrInss || totalVencimentosFallback,
+                                baseFgts: selectedSlip.baseFgts || totalVencimentosFallback,
+                                fgtsMes: selectedSlip.fgtsMes || Number((totalVencimentosFallback * 0.08).toFixed(2)),
+                                baseIrrf: selectedSlip.baseIrrf || Math.max(0, totalVencimentosFallback - inssAmountFallback),
+                                faixaIrrf: selectedSlip.faixaIrrf || (irpfAmountFallback > 0 ? formatNumber(irpfAmountFallback) : 'ISENTO')
+                              };
+
+                          const totalVencimentos = slipCalculations.totalAdditions;
+                          const totalDescontos = slipCalculations.totalDeductions;
+                          const netSalaryDisplay = selectedSlip.netSalary ?? slipCalculations.netSalary;
+                          const fgtsMesDisplay = selectedSlip.fgtsMes ?? slipCalculations.fgtsMes;
+                          const salContrInssDisplay = selectedSlip.salContrInss ?? slipCalculations.salContrInss;
+                          const baseFgtsDisplay = selectedSlip.baseFgts ?? slipCalculations.baseFgts;
+                          const baseIrrfDisplay = selectedSlip.baseIrrf ?? slipCalculations.baseIrrf;
+                          const faixaIrrfDisplay = selectedSlip.faixaIrrf ?? slipCalculations.faixaIrrf;
 
                           return (
                             <div className="border border-black bg-white text-black font-mono text-[9px] w-full select-none leading-none">
@@ -1674,8 +1984,13 @@ export default function MySalarySlips() {
                                   </div>
                                 </div>
                                 <div className="col-span-3 p-2 flex flex-col justify-between text-right h-14">
-                                  <div className="font-bold text-[7.5px] text-zinc-900 leading-none uppercase">
-                                    Folha Mensal
+                                  <div>
+                                    <div className="font-bold text-[7.5px] text-zinc-900 leading-none uppercase">
+                                      Folha Mensal
+                                    </div>
+                                    <div className="text-[6.5px] font-bold text-blue-900 mt-0.5 tracking-tight">
+                                      Cópia do Colaborador • Salva no App
+                                    </div>
                                   </div>
                                   <div className="font-extrabold text-[8.5px] text-black">
                                     {months[selectedSlip.month - 1]} de {selectedSlip.year}
@@ -1741,63 +2056,87 @@ export default function MySalarySlips() {
                                 </div>
 
                                 <div className="relative z-10">
-                                  {/* 1. Base Salary Row */}
-                                  <div className="grid grid-cols-12 px-1 py-1 text-zinc-950">
-                                    <div className="col-span-1 text-center font-bold text-zinc-700">8781</div>
-                                    <div className="col-span-5 uppercase pl-3">DIAS NORMAIS</div>
-                                    <div className="col-span-2 text-right text-zinc-800 pr-3">30,00</div>
-                                    <div className="col-span-2 text-right font-black pr-3">{formatNumber(selectedSlip.baseSalary)}</div>
-                                    <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
-                                  </div>
-
-                                  {/* 2. Additions (Bonuses, DSR, extra hours etc) */}
-                                  {selectedSlip.taxes?.filter((t: any) => t.type === 'addition').map((t: any, idx: number) => (
-                                    <div className="grid grid-cols-12 px-1 py-1 text-zinc-950" key={`add-${idx}`}>
-                                      <div className="col-span-1 text-center font-bold text-zinc-700">
-                                        {getRubricCode(t.name, '205')}
-                                      </div>
-                                      <div className="col-span-5 uppercase pl-3 truncate">{t.name}</div>
-                                      <div className="col-span-2 text-right text-zinc-800 pr-3">
-                                        {t.name.includes('HORAS EXTRAS') ? '7:30' : '-'}
-                                      </div>
-                                      <div className="col-span-2 text-right font-black pr-3">{formatNumber(t.amount)}</div>
-                                      <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
-                                    </div>
-                                  ))}
-
-                                  {/* 3. Deductions (INSS, IRPF etc) */}
-                                  {selectedSlip.taxes?.filter((t: any) => t.type === 'deduction' || !t.type).map((t: any, idx: number) => {
-                                    const isINSS = t.name.toUpperCase().includes('INSS');
-                                    const isIRPF = t.name.toUpperCase().includes('IRPF') || t.name.toUpperCase().includes('IMPOSTO');
-                                    let refVal = '-';
-                                    if (isINSS) refVal = '7,90';
-                                    else if (isIRPF) refVal = '7,50';
-
-                                    return (
-                                      <div className="grid grid-cols-12 px-1 py-1 text-zinc-950" key={`tax-ded-${idx}`}>
-                                        <div className="col-span-1 text-center font-bold text-zinc-700">
-                                          {getRubricCode(t.name, isINSS ? '998' : '508')}
+                                  {hasStructuredItems ? (
+                                    selectedSlip.items.map((item: SalarySlipLineItem, idx: number) => {
+                                      const isAdd = item.type === 'addition';
+                                      const isInfo = item.type === 'info' || item.code === '9382' || item.code === '9392';
+                                      return (
+                                        <div className="grid grid-cols-12 px-1 py-1 text-zinc-950 hover:bg-blue-50/20" key={item.id || idx}>
+                                          <div className="col-span-1 text-center font-bold text-zinc-700">{item.code || '---'}</div>
+                                          <div className="col-span-5 uppercase pl-3 truncate font-medium">{item.description}</div>
+                                          <div className="col-span-2 text-right text-zinc-800 pr-3 font-medium">{item.reference || '-'}</div>
+                                          <div className="col-span-2 text-right font-black pr-3">
+                                            {isInfo ? <span className="text-zinc-300">-</span> : (isAdd ? formatNumber(item.amount) : <span className="text-zinc-300">-</span>)}
+                                          </div>
+                                          <div className="col-span-2 text-right font-black pr-3">
+                                            {isInfo ? <span className="text-zinc-300">-</span> : (!isAdd ? <span className="text-red-650">{formatNumber(item.amount)}</span> : <span className="text-zinc-300">-</span>)}
+                                          </div>
                                         </div>
-                                        <div className="col-span-5 uppercase pl-3 truncate">{t.name}</div>
-                                        <div className="col-span-2 text-right text-zinc-800 pr-3">{refVal}</div>
+                                      );
+                                    })
+                                  ) : (
+                                    <>
+                                      {/* 1. Base Salary Row */}
+                                      <div className="grid grid-cols-12 px-1 py-1 text-zinc-950">
+                                        <div className="col-span-1 text-center font-bold text-zinc-700">8781</div>
+                                        <div className="col-span-5 uppercase pl-3">DIAS NORMAIS</div>
+                                        <div className="col-span-2 text-right text-zinc-800 pr-3">31,00</div>
+                                        <div className="col-span-2 text-right font-black pr-3">{formatNumber(selectedSlip.baseSalary)}</div>
                                         <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
-                                        <div className="col-span-2 text-right font-black text-red-650 pr-3">{formatNumber(t.amount)}</div>
                                       </div>
-                                    );
-                                  })}
 
-                                  {/* 4. Manual Discounts */}
-                                  {selectedSlip.discounts?.map((d: any, idx: number) => (
-                                    <div className="grid grid-cols-12 px-1 py-1 text-zinc-950" key={`disc-${idx}`}>
-                                      <div className="col-span-1 text-center font-bold text-zinc-700">
-                                        {getRubricCode(d.name, '620')}
-                                      </div>
-                                      <div className="col-span-5 uppercase pl-3 truncate">{d.name}</div>
-                                      <div className="col-span-2 text-right text-zinc-800 pr-3">-</div>
-                                      <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
-                                      <div className="col-span-2 text-right font-black text-red-650 pr-3">{formatNumber(d.amount)}</div>
-                                    </div>
-                                  ))}
+                                      {/* 2. Additions */}
+                                      {selectedSlip.taxes?.filter((t: any) => t.type === 'addition').map((t: any, idx: number) => (
+                                        <div className="grid grid-cols-12 px-1 py-1 text-zinc-950" key={`add-${idx}`}>
+                                          <div className="col-span-1 text-center font-bold text-zinc-700">
+                                            {t.code || getRubricCode(t.name, '205')}
+                                          </div>
+                                          <div className="col-span-5 uppercase pl-3 truncate">{t.name}</div>
+                                          <div className="col-span-2 text-right text-zinc-800 pr-3">
+                                            {t.reference || (t.name.includes('HORAS EXTRAS') ? '7:30' : '-')}
+                                          </div>
+                                          <div className="col-span-2 text-right font-black pr-3">{formatNumber(t.amount)}</div>
+                                          <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
+                                        </div>
+                                      ))}
+
+                                      {/* 3. Deductions */}
+                                      {selectedSlip.taxes?.filter((t: any) => t.type === 'deduction' || !t.type).map((t: any, idx: number) => {
+                                        const isINSS = t.name.toUpperCase().includes('INSS');
+                                        const isIRPF = t.name.toUpperCase().includes('IRPF') || t.name.toUpperCase().includes('IMPOSTO');
+                                        let refVal = t.reference || '-';
+                                        if (refVal === '-') {
+                                          if (isINSS) refVal = '7,90';
+                                          else if (isIRPF) refVal = '7,50';
+                                        }
+
+                                        return (
+                                          <div className="grid grid-cols-12 px-1 py-1 text-zinc-950" key={`tax-ded-${idx}`}>
+                                            <div className="col-span-1 text-center font-bold text-zinc-700">
+                                              {t.code || getRubricCode(t.name, isINSS ? '998' : '508')}
+                                            </div>
+                                            <div className="col-span-5 uppercase pl-3 truncate">{t.name}</div>
+                                            <div className="col-span-2 text-right text-zinc-800 pr-3">{refVal}</div>
+                                            <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
+                                            <div className="col-span-2 text-right font-black text-red-650 pr-3">{formatNumber(t.amount)}</div>
+                                          </div>
+                                        );
+                                      })}
+
+                                      {/* 4. Manual Discounts */}
+                                      {selectedSlip.discounts?.map((d: any, idx: number) => (
+                                        <div className="grid grid-cols-12 px-1 py-1 text-zinc-950" key={`disc-${idx}`}>
+                                          <div className="col-span-1 text-center font-bold text-zinc-700">
+                                            {d.code || getRubricCode(d.name, '620')}
+                                          </div>
+                                          <div className="col-span-5 uppercase pl-3 truncate">{d.name}</div>
+                                          <div className="col-span-2 text-right text-zinc-800 pr-3">{d.reference || '-'}</div>
+                                          <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
+                                          <div className="col-span-2 text-right font-black text-red-650 pr-3">{formatNumber(d.amount)}</div>
+                                        </div>
+                                      ))}
+                                    </>
+                                  )}
                                 </div>
                               </div>
 
@@ -1819,7 +2158,7 @@ export default function MySalarySlips() {
                                   <div className="text-[14px] font-sans font-bold text-zinc-950 mr-2 leading-none">⇨</div>
                                 </div>
                                 <div className="col-span-4 p-2 bg-zinc-100 font-mono text-right font-black text-[12px] text-zinc-950 pr-3 leading-none h-full flex items-center justify-end">
-                                  <span>{formatNumber(selectedSlip.netSalary)}</span>
+                                  <span>{formatNumber(netSalaryDisplay)}</span>
                                 </div>
                               </div>
 
@@ -1827,27 +2166,27 @@ export default function MySalarySlips() {
                               <div className="grid grid-cols-12 text-[7px] text-center bg-zinc-50 uppercase divide-x divide-black h-8 leading-tight">
                                 <div className="col-span-2 p-0.5 flex flex-col justify-between">
                                   <span className="block text-[5.5px] font-bold text-zinc-500">Salário Base</span>
-                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(selectedSlip.baseSalary)}</span>
+                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(slipCalculations.baseSalary)}</span>
                                 </div>
                                 <div className="col-span-2 p-0.5 flex flex-col justify-between">
                                   <span className="block text-[5.5px] font-bold text-zinc-500">Sal. Contr. INSS</span>
-                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(totalVencimentos)}</span>
+                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(salContrInssDisplay)}</span>
                                 </div>
                                 <div className="col-span-2 p-0.5 flex flex-col justify-between">
                                   <span className="block text-[5.5px] font-bold text-zinc-500">Base Calc. FGTS</span>
-                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(totalVencimentos)}</span>
+                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(baseFgtsDisplay)}</span>
                                 </div>
                                 <div className="col-span-2 p-0.5 flex flex-col justify-between">
                                   <span className="block text-[5.5px] font-bold text-zinc-500">F.G.T.S do Mês</span>
-                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(fgtsAmount)}</span>
+                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(fgtsMesDisplay)}</span>
                                 </div>
                                 <div className="col-span-2 p-0.5 flex flex-col justify-between">
                                   <span className="block text-[5.5px] font-bold text-zinc-500">Base Calc. IRPF</span>
-                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(irpfBase)}</span>
+                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(baseIrrfDisplay)}</span>
                                 </div>
                                 <div className="col-span-2 p-0.5 flex flex-col justify-between">
                                   <span className="block text-[5.5px] font-bold text-zinc-500">Faixa IRPF</span>
-                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{irpfAmount > 0 ? formatNumber(irpfAmount) : '0,00'}</span>
+                                  <span className="font-extrabold text-[7.5px] font-mono leading-none">{faixaIrrfDisplay}</span>
                                 </div>
                               </div>
 
@@ -2162,86 +2501,267 @@ export default function MySalarySlips() {
                 
                 {/* COLUMN 1: FORM CONTROLS */}
                 <div className={cn(
-                  "lg:col-span-6 space-y-4 max-h-[500px] overflow-y-auto pr-1--",
+                  "lg:col-span-6 space-y-4 max-h-[560px] overflow-y-auto pr-1",
                   adminModalTab === 'form' ? "block" : "hidden lg:block bg-white"
-                ).replace(' pr-1--', ' pr-1')}>
-                  {/* AI Document Parser Box */}
-                  <div className="bg-gradient-to-br from-blue-50/70 to-indigo-50/50 border border-blue-100 rounded-3xl p-5 mb-4 space-y-3 shadow-xs">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="p-1.5 bg-blue-600 text-white rounded-lg">
-                          <Sparkles className="w-4 h-4 animate-pulse" />
-                        </div>
-                        <div>
-                          <h4 className="font-extrabold text-xs text-blue-950 uppercase tracking-wide">Importação Inteligente com IA</h4>
-                          <p className="text-[10px] text-blue-600 font-bold">Extraia dados de holerites (fotos, PDFs ou TXT)</p>
+                )}>
+                  {/* Mode Selector Tabs: Upload Inteligente vs Preenchimento Manual */}
+                  <div className="bg-slate-100 p-1.5 rounded-2xl flex gap-1.5 border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setSlipCreationMode('upload')}
+                      className={cn(
+                        "flex-1 py-2.5 px-3 rounded-xl text-xs font-black uppercase transition-all cursor-pointer flex items-center justify-center gap-2",
+                        slipCreationMode === 'upload'
+                          ? "bg-white text-blue-600 shadow-sm border border-slate-200/60 font-extrabold"
+                          : "text-slate-500 hover:text-slate-800"
+                      )}
+                    >
+                      <Sparkles className="w-4 h-4 text-blue-500" />
+                      1. Upload Inteligente (IA/PDF)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSlipCreationMode('manual')}
+                      className={cn(
+                        "flex-1 py-2.5 px-3 rounded-xl text-xs font-black uppercase transition-all cursor-pointer flex items-center justify-center gap-2",
+                        slipCreationMode === 'manual'
+                          ? "bg-white text-blue-600 shadow-sm border border-slate-200/60 font-extrabold"
+                          : "text-slate-500 hover:text-slate-800"
+                      )}
+                    >
+                      <Edit3 className="w-4 h-4 text-blue-500" />
+                      2. Preenchimento Manual
+                    </button>
+                  </div>
+
+                  {/* Mode 1: AI Document Parser Box */}
+                  {slipCreationMode === 'upload' && (
+                    <div className="bg-gradient-to-br from-blue-50/70 to-indigo-50/50 border border-blue-100 rounded-3xl p-5 space-y-3 shadow-xs animate-fade-in">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 bg-blue-600 text-white rounded-lg">
+                            <Sparkles className="w-4 h-4 animate-pulse" />
+                          </div>
+                          <div>
+                            <h4 className="font-extrabold text-xs text-blue-950 uppercase tracking-wide">Importação Inteligente com IA</h4>
+                            <p className="text-[10px] text-blue-600 font-bold">Extraia dados de holerites (fotos, PDFs ou TXT)</p>
+                          </div>
                         </div>
                       </div>
+
+                      {isParsingAI ? (
+                        <div className="flex flex-col items-center justify-center p-4 py-6 bg-white rounded-2xl border border-dashed border-blue-200 gap-3">
+                          <RefreshCw className="w-5 h-5 text-blue-600 animate-spin" />
+                          <p className="text-xs font-bold text-slate-655 animate-pulse text-center">
+                            A IA está analisando este contracheque...
+                          </p>
+                          <span className="text-[9px] text-slate-400">Interpretando códigos, referências, salários e identificando colaborador</span>
+                        </div>
+                      ) : (
+                        <div>
+                          <div 
+                            onDragOver={handleDragOver}
+                            onDragLeave={handleDragLeave}
+                            onDrop={handleDrop}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              aiFileInputRef.current?.click();
+                            }}
+                            className={cn(
+                              "flex flex-col items-center justify-center p-4 py-5 rounded-2xl border border-dashed transition-all cursor-pointer select-none text-center",
+                              isDragActive 
+                                ? "bg-blue-50/90 border-blue-500 scale-[1.01] shadow-md shadow-blue-100" 
+                                : "bg-white border-slate-200 hover:bg-slate-50/50 hover:border-blue-300"
+                            )}
+                          >
+                            <Upload className={cn("w-5 h-5 mb-1 transition-all", isDragActive ? "text-blue-600 scale-110" : "text-slate-450")} />
+                            <p className="text-xs font-bold text-slate-750">Selecione ou solte o arquivo do Holerite</p>
+                            <span className="text-[9px] text-slate-400">Imagens (PNG/JPG), PDF ou TXT</span>
+                          </div>
+                          <input 
+                            ref={aiFileInputRef}
+                            type="file" 
+                            accept="image/*,application/pdf,text/plain" 
+                            onChange={handleAIFileUpload} 
+                            className="hidden" 
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                        </div>
+                      )}
+
+                      {aiSuccessMessage && (
+                        <div className="bg-emerald-50 border border-emerald-100/70 text-emerald-800 p-3 rounded-xl text-[10px] font-medium flex items-start gap-2 animate-fade-in">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                          <div>
+                            <p className="font-extrabold text-emerald-950">Processamento Concluído</p>
+                            <p className="opacity-90">{aiSuccessMessage}</p>
+                            <span className="block mt-1 text-[9px] font-bold text-emerald-700">
+                              Os lançamentos foram preenchidos na tabela abaixo. Você pode ajustar qualquer rubrica manualmente.
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {aiError && (
+                        <div className="bg-rose-50 border border-rose-100 text-rose-800 p-3 rounded-xl text-[10px] font-medium flex items-start gap-2 animate-rose-fade">
+                          <Info className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                          <div>
+                            <p className="font-extrabold text-rose-950">Falha no Processamento</p>
+                            <p className="opacity-95">{aiError}</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Mode 2: Manual Rubric Entry & Catalog Controls */}
+                  <div className="bg-white border border-slate-200/90 rounded-3xl p-4.5 space-y-3.5 shadow-xs">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                      <div className="flex items-center gap-2">
+                        <Tag className="w-4 h-4 text-blue-600" />
+                        <h4 className="font-black text-xs text-slate-800 uppercase tracking-wide">
+                          Lançamento de Rubricas no Contra-Cheque
+                        </h4>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowRubricsCatalogModal(true)}
+                        className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-[10px] font-black flex items-center gap-1.5 transition-colors cursor-pointer border border-blue-200/60"
+                      >
+                        <BookOpen className="w-3.5 h-3.5" />
+                        Catálogo de Códigos & Rubricas
+                      </button>
                     </div>
 
-                    {isParsingAI ? (
-                      <div className="flex flex-col items-center justify-center p-4 py-6 bg-white rounded-2xl border border-dashed border-blue-200 gap-3">
-                        <RefreshCw className="w-5 h-5 text-blue-600 animate-spin" />
-                        <p className="text-xs font-bold text-slate-655 animate-pulse text-center">
-                          A IA está analisando este contracheque...
-                        </p>
-                        <span className="text-[9px] text-slate-400">Interpretando salários, adicionais e identificando colaborador</span>
-                      </div>
-                    ) : (
-                      <div>
-                        <div 
-                          onDragOver={handleDragOver}
-                          onDragLeave={handleDragLeave}
-                          onDrop={handleDrop}
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            aiFileInputRef.current?.click();
+                    {/* Fast rubric selector from catalog */}
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
+                        Selecionar Rubrica do Catálogo (Preenchimento Rápido)
+                      </label>
+                      <select
+                        value={selectedCatalogCode}
+                        onChange={(e) => handleSelectCatalogRubric(e.target.value)}
+                        className="w-full text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-100 cursor-pointer"
+                      >
+                        <option value="">-- Escolha uma rubrica do catálogo (ex: 8781, 0150, 998, 508...) --</option>
+                        {allRubrics.map((r, idx) => (
+                          <option key={`${r.code}-${r.type}-${idx}`} value={`${r.code}:::${r.type}`}>
+                            {r.code} - {r.name} ({r.type === 'addition' ? 'Vencimento' : (r.type === 'info' ? 'Somente Referência' : 'Desconto')}{r.defaultReference ? ` • Ref: ${r.defaultReference}` : ''})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Inputs: Código, Descrição, Referência, Tipo, Valor */}
+                    <div className="grid grid-cols-12 gap-2 pt-1">
+                      <div className="col-span-3">
+                        <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Código</label>
+                        <input
+                          type="text"
+                          placeholder="Ex: 8781"
+                          value={itemInput.code}
+                          onChange={(e) => {
+                            const newCode = e.target.value;
+                            const match = allRubrics.find(r => r.code === newCode.trim());
+                            if (match) {
+                              setItemInput(prev => ({
+                                ...prev,
+                                code: newCode,
+                                description: prev.description && prev.description !== '-' ? prev.description : match.name,
+                                type: match.type,
+                                reference: prev.reference && prev.reference !== '-' ? prev.reference : (match.defaultReference || '-')
+                              }));
+                            } else {
+                              setItemInput(prev => ({ ...prev, code: newCode }));
+                            }
                           }}
-                          className={cn(
-                            "flex flex-col items-center justify-center p-4 py-5 rounded-2xl border border-dashed transition-all cursor-pointer select-none text-center",
-                            isDragActive 
-                              ? "bg-blue-50/90 border-blue-500 scale-[1.01] shadow-md shadow-blue-100" 
-                              : "bg-white border-slate-200 hover:bg-slate-50/50 hover:border-blue-300"
-                          )}
-                        >
-                          <Upload className={cn("w-5 h-5 mb-1 transition-all", isDragActive ? "text-blue-600 scale-110" : "text-slate-450")} />
-                          <p className="text-xs font-bold text-slate-750">Selecione ou solte o arquivo do Holerite</p>
-                          <span className="text-[9px] text-slate-400">Imagens (PNG/JPG), PDF ou TXT</span>
-                        </div>
-                        <input 
-                          ref={aiFileInputRef}
-                          type="file" 
-                          accept="image/*,application/pdf,text/plain" 
-                          onChange={handleAIFileUpload} 
-                          className="hidden" 
-                          onClick={(e) => e.stopPropagation()}
+                          className="w-full text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-slate-800 focus:ring-2 focus:ring-blue-100 uppercase"
                         />
                       </div>
-                    )}
-
-                    {aiSuccessMessage && (
-                      <div className="bg-emerald-50 border border-emerald-100/70 text-emerald-800 p-3 rounded-xl text-[10px] font-medium flex items-start gap-2 animate-fade-in">
-                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                        <div>
-                          <p className="font-extrabold text-emerald-950">Processamento Concluído</p>
-                          <p className="opacity-90">{aiSuccessMessage}</p>
-                        </div>
+                      <div className="col-span-6">
+                        <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Descrição da Rubrica</label>
+                        <input
+                          type="text"
+                          placeholder="Ex: DIAS NORMAIS ou HORAS EXTRAS 50%"
+                          value={itemInput.description}
+                          onChange={(e) => setItemInput({ ...itemInput, description: e.target.value })}
+                          className="w-full text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-slate-800 focus:ring-2 focus:ring-blue-100 uppercase"
+                        />
                       </div>
-                    )}
-
-                    {aiError && (
-                      <div className="bg-rose-50 border border-rose-100 text-rose-800 p-3 rounded-xl text-[10px] font-medium flex items-start gap-2 animate-rose-fade">
-                        <Info className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                        <div>
-                          <p className="font-extrabold text-rose-950">Falha no Processamento</p>
-                          <p className="opacity-95">{aiError}</p>
-                        </div>
+                      <div className="col-span-3">
+                        <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Referência</label>
+                        <input
+                          type="text"
+                          placeholder="31,00 ou 7:30"
+                          value={itemInput.reference}
+                          onChange={(e) => setItemInput({ ...itemInput, reference: e.target.value })}
+                          className="w-full text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-slate-800 focus:ring-2 focus:ring-blue-100"
+                        />
                       </div>
-                    )}
+
+                      <div className="col-span-7 flex flex-wrap items-center gap-2 bg-slate-50 p-2 rounded-xl border border-slate-200">
+                        <label className="flex items-center gap-1.5 text-[11px] font-black text-slate-700 cursor-pointer select-none">
+                          <input
+                            type="radio"
+                            name="rubricType"
+                            checked={itemInput.type === 'addition'}
+                            onChange={() => setItemInput({ ...itemInput, type: 'addition' })}
+                            className="w-3.5 h-3.5 text-blue-600 focus:ring-0 cursor-pointer"
+                          />
+                          <span className="text-emerald-700 font-bold">Vencimento (+)</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 text-[11px] font-black text-slate-700 cursor-pointer select-none">
+                          <input
+                            type="radio"
+                            name="rubricType"
+                            checked={itemInput.type === 'deduction'}
+                            onChange={() => setItemInput({ ...itemInput, type: 'deduction' })}
+                            className="w-3.5 h-3.5 text-blue-600 focus:ring-0 cursor-pointer"
+                          />
+                          <span className="text-red-650 font-bold">Desconto (-)</span>
+                        </label>
+                        <label className="flex items-center gap-1.5 text-[11px] font-black text-slate-700 cursor-pointer select-none">
+                          <input
+                            type="radio"
+                            name="rubricType"
+                            checked={itemInput.type === 'info' || itemInput.code === '9382' || itemInput.code === '9392'}
+                            onChange={() => setItemInput({ ...itemInput, type: 'info', amount: '0' })}
+                            className="w-3.5 h-3.5 text-blue-600 focus:ring-0 cursor-pointer"
+                          />
+                          <span className="text-blue-700 font-bold">Somente Ref.</span>
+                        </label>
+                      </div>
+
+                      <div className="col-span-3">
+                        {itemInput.type === 'info' || itemInput.code === '9382' || itemInput.code === '9392' ? (
+                          <div className="w-full h-full text-[10px] font-bold text-slate-400 bg-slate-100/90 border border-slate-200 rounded-xl px-2 py-2 flex items-center justify-center">
+                            Somente Ref. (-)
+                          </div>
+                        ) : (
+                          <input
+                            type="number"
+                            placeholder="Valor R$"
+                            value={itemInput.amount}
+                            onChange={(e) => setItemInput({ ...itemInput, amount: e.target.value })}
+                            className="w-full h-full text-xs font-black bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-slate-800 focus:ring-2 focus:ring-blue-100"
+                          />
+                        )}
+                      </div>
+
+                      <div className="col-span-2">
+                        <button
+                          type="button"
+                          onClick={handleAddLineItem}
+                          className="w-full h-full py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-black text-xs cursor-pointer flex items-center justify-center gap-1 shadow-sm transition-all"
+                        >
+                          <Plus className="w-4 h-4" /> Add
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                  
-                   {/* Document Type Selector */}
+
+                  {/* Document Type Selector */}
                   <div className="bg-slate-50 border border-slate-100 rounded-2xl p-2.5 flex gap-2">
                     <button
                       type="button"
@@ -2368,39 +2888,33 @@ export default function MySalarySlips() {
                         </div>
                       </div>
 
-                      {/* Base Salary */}
-                      <div>
-                        <label className="block text-xs font-bold text-slate-400 mb-2 uppercase">Salário Contratual Base (R$)</label>
-                        <input 
-                          type="number"
-                          value={newSlipForm.baseSalary}
-                          onChange={(e) => setNewSlipForm({ ...newSlipForm, baseSalary: Number(e.target.value) })}
-                          className="w-full text-xs font-bold bg-slate-50 rounded-xl px-3 py-2 text-slate-705 focus:outline-none focus:ring-2 focus:ring-blue-105"
-                        />
-                        <div className="mt-3 flex items-center justify-between p-3.5 bg-blue-50/50 rounded-xl border border-blue-100/50">
-                          <div className="flex flex-col pr-4">
-                            <span className="text-xs font-bold text-blue-900">Calcular Impostos Automaticamente (CLT)</span>
-                            <span className="text-[10px] text-blue-700 font-medium mt-0.5">
-                              Desative para holerites gerados via IA, mantendo os valores reais do documento físico sem alterações.
-                            </span>
+                      {/* Base Salary & Automation controls */}
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between p-3 bg-blue-50/60 rounded-2xl border border-blue-100">
+                          <div className="flex items-center gap-2">
+                            <Calculator className="w-4 h-4 text-blue-600" />
+                            <div>
+                              <span className="text-xs font-black text-blue-950 block">Cálculo Automático de INSS & IRRF</span>
+                              <span className="text-[10px] text-blue-700 font-medium">
+                                Recalcula alíquotas oficiais CLT em tempo real conforme os proventos são adicionados.
+                              </span>
+                            </div>
                           </div>
-                          <label className="relative inline-flex items-center cursor-pointer select-none">
-                            <input 
-                              type="checkbox" 
-                              checked={newSlipForm.autoCalculateTaxes !== false} 
-                              onChange={(e) => setNewSlipForm({ ...newSlipForm, autoCalculateTaxes: e.target.checked })}
-                              className="sr-only peer"
-                            />
-                            <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
-                          </label>
+                          <button
+                            type="button"
+                            onClick={handleAutoRecalculateTaxes}
+                            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-[10px] font-black cursor-pointer shadow-xs transition-colors whitespace-nowrap"
+                          >
+                            ⚡ Atualizar INSS & IRRF
+                          </button>
                         </div>
 
                         {/* Bloco de Cálculo Automático de Ponto e Vale Refeição (1% Desconto no Holerite) */}
-                        <div className="mt-3 p-3.5 bg-emerald-50/70 rounded-2xl border border-emerald-200/80 space-y-2.5">
+                        <div className="p-3.5 bg-emerald-50/70 rounded-2xl border border-emerald-200/80 space-y-2.5">
                           <div className="flex items-center justify-between">
                             <div>
                               <span className="text-xs font-black text-emerald-950 block">
-                                Ponto & Vale Refeição Automático (R$ 26,40/plantão • 1% Desconto)
+                                Vale Refeição Automático (R$ 26,40/plantão • 1% Desconto)
                               </span>
                               <span className="text-[10px] text-emerald-700 font-semibold">
                                 Créd. Cartão: <strong>R$ {calcularPontoEValeAutomatico(slipPlantoes).totalCreditoCartao.replace('.', ',')}</strong> • Desconto Holerite (1%): <strong>R$ {calcularPontoEValeAutomatico(slipPlantoes).descontoNoSueldo.replace('.', ',')}</strong>
@@ -2423,31 +2937,31 @@ export default function MySalarySlips() {
                               max={31}
                               value={slipPlantoes}
                               onChange={(e) => applyValeDiscountToSlip(Number(e.target.value))}
-                              className="w-20 px-2.5 py-1.5 bg-white border border-emerald-200 rounded-xl text-xs font-black text-center text-slate-800"
+                              className="w-16 px-2 py-1 bg-white border border-emerald-200 rounded-xl text-xs font-black text-center text-slate-800"
                             />
                             <button
                               type="button"
                               onClick={() => applyValeDiscountToSlip(15)}
                               className={cn(
-                                "px-3 py-1.5 rounded-xl text-[10px] font-black border transition-all cursor-pointer",
+                                "px-2.5 py-1 rounded-xl text-[10px] font-black border transition-all cursor-pointer",
                                 slipPlantoes === 15
                                   ? "bg-emerald-600 text-white border-emerald-600"
                                   : "bg-white text-emerald-800 border-emerald-200 hover:bg-emerald-100"
                               )}
                             >
-                              15 Plantões (Créd. R$ 396,00 | Desc. R$ 3,96)
+                              15 Plantões (Desc. R$ 3,96)
                             </button>
                             <button
                               type="button"
                               onClick={() => applyValeDiscountToSlip(16)}
                               className={cn(
-                                "px-3 py-1.5 rounded-xl text-[10px] font-black border transition-all cursor-pointer",
+                                "px-2.5 py-1 rounded-xl text-[10px] font-black border transition-all cursor-pointer",
                                 slipPlantoes === 16
                                   ? "bg-emerald-600 text-white border-emerald-600"
                                   : "bg-white text-emerald-800 border-emerald-200 hover:bg-emerald-100"
                               )}
                             >
-                              16 Plantões (Créd. R$ 422,40 | Desc. R$ 4,22)
+                              16 Plantões (Desc. R$ 4,22)
                             </button>
                           </div>
                         </div>
@@ -2455,119 +2969,167 @@ export default function MySalarySlips() {
                     </>
                   )}
 
-                  {/* Rubricas customizadas additions / deductions widget */}
-                  <div className="border border-slate-100 p-4 rounded-2xl bg-slate-50/50 space-y-4">
-                    <h4 className="font-extrabold text-xs text-slate-700 uppercase tracking-wide">Acrescer Outras Rubricas Adicionais</h4>
-                    
-                    <div className="grid grid-cols-12 gap-2">
-                      <div className="col-span-6">
-                        <input 
-                          type="text"
-                          placeholder="EX: Horas Extras 50%"
-                          value={tempItem.name}
-                          onChange={(e) => setTempItem({ ...tempItem, name: e.target.value })}
-                          className="w-full text-xs bg-white rounded-xl px-3 py-2.5 text-slate-707 placeholder:text-slate-400"
-                        />
+                  {/* Interactive Rubrics Table */}
+                  <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-xs">
+                    <div className="p-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <ListPlus className="w-4 h-4 text-slate-600" />
+                        <h4 className="font-extrabold text-xs text-slate-800 uppercase tracking-wide">
+                          Rubricas Registradas na Folha ({newSlipItems.length})
+                        </h4>
                       </div>
-                      <div className="col-span-3">
-                        <input 
-                          type="number"
-                          placeholder="Valor R$"
-                          value={tempItem.amount || ''}
-                          onChange={(e) => setTempItem({ ...tempItem, amount: Number(e.target.value) })}
-                          className="w-full text-xs bg-white rounded-xl px-3 py-2.5 text-slate-707"
-                        />
-                      </div>
-                      <div className="col-span-3">
-                        <button 
-                          type="button"
-                          onClick={handleAddSlipItem}
-                          className="w-full py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-xs cursor-pointer flex items-center justify-center gap-1.5"
-                        >
-                          <Plus className="w-4 h-4" /> Add
-                        </button>
-                      </div>
+                      <span className="text-[10px] font-bold text-slate-400">
+                        Edite valores ou referências diretamente nas linhas
+                      </span>
                     </div>
 
-                    <div className="flex gap-4 text-[10px] font-bold text-slate-550 border-b border-slate-100 pb-2">
-                      <label className="flex items-center gap-1 cursor-pointer select-none">
-                        <input 
-                          type="radio" 
-                          name="itemtype" 
-                          checked={tempItem.type === 'addition'} 
-                          onChange={() => setTempItem({ ...tempItem, type: 'addition' })}
-                          className="text-blue-600 focus:ring-0 w-3.5 h-3.5" 
-                        />
-                        Vencimento (Adicional +)
-                      </label>
-                      <label className="flex items-center gap-1 cursor-pointer select-none">
-                        <input 
-                          type="radio" 
-                          name="itemtype"
-                          checked={tempItem.type === 'deduction'} 
-                          onChange={() => setTempItem({ ...tempItem, type: 'deduction' })}
-                          className="text-blue-600 focus:ring-0 w-3.5 h-3.5" 
-                        />
-                        Desconto (Dedução -)
-                      </label>
+                    <div className="max-h-60 overflow-y-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-slate-100 text-slate-600 font-black text-[9px] uppercase border-b border-slate-200">
+                          <tr>
+                            <th className="py-2 px-2.5 text-center w-14">Cód.</th>
+                            <th className="py-2 px-2">Descrição</th>
+                            <th className="py-2 px-2 text-center w-20">Ref.</th>
+                            <th className="py-2 px-2 text-right w-24">Vencimento</th>
+                            <th className="py-2 px-2 text-right w-24">Desconto</th>
+                            <th className="py-2 px-2 text-center w-10"></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {newSlipItems.map((item, idx) => {
+                            const isAdd = item.type === 'addition';
+                            const isInfo = item.type === 'info' || item.code === '9382' || item.code === '9392';
+                            return (
+                              <tr key={item.id || idx} className="hover:bg-slate-50/70 transition-colors">
+                                <td className="py-1 px-1.5 text-center">
+                                  <input
+                                    type="text"
+                                    value={item.code || ''}
+                                    onChange={(e) => handleUpdateLineItem(idx, 'code', e.target.value)}
+                                    className="w-16 text-xs font-mono font-black text-center bg-slate-50 border border-slate-200 rounded px-1 py-1 focus:bg-white uppercase focus:ring-1 focus:ring-blue-400"
+                                    placeholder="Cód."
+                                  />
+                                </td>
+                                <td className="py-1 px-1.5">
+                                  <input
+                                    type="text"
+                                    value={item.description || ''}
+                                    onChange={(e) => handleUpdateLineItem(idx, 'description', e.target.value)}
+                                    className="w-full text-xs font-bold text-slate-800 bg-slate-50 border border-slate-200 rounded px-2 py-1 focus:bg-white uppercase focus:ring-1 focus:ring-blue-400"
+                                    placeholder="Descrição da rubrica"
+                                  />
+                                </td>
+                                <td className="py-1 px-1.5 text-center">
+                                  <input
+                                    type="text"
+                                    value={item.reference || ''}
+                                    onChange={(e) => handleUpdateLineItem(idx, 'reference', e.target.value)}
+                                    className="w-full text-[10px] font-bold text-center bg-slate-50 border border-slate-200 rounded px-1 py-1 focus:bg-white"
+                                  />
+                                </td>
+                                <td className="py-1 px-1.5 text-right font-mono">
+                                  {isInfo ? (
+                                    <span className="text-slate-300 font-mono text-center block text-xs" title="Somente Referência">-</span>
+                                  ) : isAdd ? (
+                                    <input
+                                      type="number"
+                                      value={item.amount || ''}
+                                      onChange={(e) => handleUpdateLineItem(idx, 'amount', Number(e.target.value))}
+                                      className="w-full text-xs font-black text-right text-emerald-700 bg-emerald-50/40 border border-emerald-200 rounded px-1.5 py-1 focus:bg-white"
+                                    />
+                                  ) : (
+                                    <span className="text-slate-300 pr-2">-</span>
+                                  )}
+                                </td>
+                                <td className="py-1 px-1.5 text-right font-mono">
+                                  {isInfo ? (
+                                    <span className="text-slate-300 font-mono text-center block text-xs" title="Somente Referência">-</span>
+                                  ) : !isAdd ? (
+                                    <input
+                                      type="number"
+                                      value={item.amount || ''}
+                                      onChange={(e) => handleUpdateLineItem(idx, 'amount', Number(e.target.value))}
+                                      className="w-full text-xs font-black text-right text-red-650 bg-rose-50/40 border border-rose-200 rounded px-1.5 py-1 focus:bg-white"
+                                    />
+                                  ) : (
+                                    <span className="text-slate-300 pr-2">-</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-2 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveLineItem(idx)}
+                                    className="text-slate-300 hover:text-red-500 cursor-pointer p-1 transition-colors"
+                                    title="Remover rubrica"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  {/* Real-time Calculation Statistics Strip */}
+                  <div className="bg-slate-900 text-white rounded-2xl p-3.5 space-y-2.5 shadow-md">
+                    <div className="flex items-center justify-between pb-1.5 border-b border-slate-800">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                        <Calculator className="w-3.5 h-3.5 text-emerald-400" />
+                        Cálculos Oficiais Automáticos (CLT)
+                      </span>
+                      <span className="text-xs font-mono font-extrabold text-emerald-400">
+                        Líquido: {formatCurrency(previewCalc.netSalary)}
+                      </span>
                     </div>
 
-                    {/* Addition items lists */}
-                    {newSlipForm.additions.length > 0 && (
-                      <div className="space-y-1">
-                        <p className="text-[9px] font-bold uppercase text-emerald-500">Adicionais Cadastrados</p>
-                        {newSlipForm.additions.map((item, idx) => (
-                          <div key={idx} className="flex justify-between items-center text-xs bg-white rounded-lg p-2 border border-slate-200/55">
-                            <span className="font-semibold text-slate-850">{item.name}</span>
-                            <div className="flex items-center gap-2">
-                              <span className="text-emerald-600 font-bold font-mono">+{formatCurrency(item.amount)}</span>
-                              <button type="button" onClick={() => handleRemoveAddition(idx)} className="text-slate-400 hover:text-red-500">
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                    <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 text-center text-[9px] font-mono">
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="block text-[7px] text-slate-400 uppercase font-sans">Salário Base</span>
+                        <span className="font-extrabold text-white">{formatCurrency(previewCalc.baseSalary)}</span>
                       </div>
-                    )}
-
-                    {/* Deduction items lists */}
-                    {newSlipForm.deductions.length > 0 && (
-                      <div className="space-y-1">
-                        <p className="text-[9px] font-bold uppercase text-red-500">Descontos Cadastrados</p>
-                        {newSlipForm.deductions.map((item, idx) => (
-                          <div key={idx} className="flex justify-between items-center text-xs bg-white rounded-lg p-2 border border-slate-200/55">
-                            <span className="font-semibold text-slate-850">{item.name}</span>
-                            <div className="flex items-center gap-2">
-                              <span className="text-red-500 font-bold font-mono">-{formatCurrency(item.amount)}</span>
-                              <button type="button" onClick={() => handleRemoveDeduction(idx)} className="text-slate-400 hover:text-red-500">
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        ))}
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="block text-[7px] text-slate-400 uppercase font-sans">Sal. Contr. INSS</span>
+                        <span className="font-extrabold text-white">{formatCurrency(previewCalc.salContrInss)}</span>
                       </div>
-                    )}
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="block text-[7px] text-slate-400 uppercase font-sans">Base Cálc. FGTS</span>
+                        <span className="font-extrabold text-white">{formatCurrency(previewCalc.baseFgts)}</span>
+                      </div>
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="block text-[7px] text-slate-400 uppercase font-sans">FGTS do Mês</span>
+                        <span className="font-extrabold text-white">{formatCurrency(previewCalc.fgtsMes)}</span>
+                      </div>
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="block text-[7px] text-slate-400 uppercase font-sans">Base Cálc. IRRF</span>
+                        <span className="font-extrabold text-white">{formatCurrency(previewCalc.baseIrrf)}</span>
+                      </div>
+                      <div className="bg-slate-800/80 p-2 rounded-xl">
+                        <span className="block text-[7px] text-slate-400 uppercase font-sans">Faixa IRRF</span>
+                        <span className="font-extrabold text-amber-400">{previewCalc.faixaIrrf}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
                 {/* COLUMN 2: HIGH FIDELITY REAL-TIME PAYCHECK PREVIEW */}
                 <div className={cn(
-                  "lg:col-span-6 space-y-4 max-h-[500px] overflow-y-auto bg-slate-50 border border-slate-150 rounded-[2rem] p-4 lg:p-5 flex flex-col justify-start relative",
+                  "lg:col-span-6 space-y-4 max-h-[560px] overflow-y-auto bg-slate-50 border border-slate-150 rounded-[2rem] p-4 lg:p-5 flex flex-col justify-start relative",
                   adminModalTab === 'preview' ? "block" : "hidden lg:block bg-slate-50"
                 )}>
                   <div className="flex items-center justify-between pb-2 border-b border-slate-200">
-                    <span className="text-[9px] font-black uppercase text-slate-400 font-mono tracking-wider">Demonstrativo de Holerite Digital (Prévia)</span>
-                    <span className="px-2 py-0.5 bg-zinc-900/10 text-zinc-800 text-[8px] font-black uppercase rounded font-mono">Prévia</span>
+                    <span className="text-[9px] font-black uppercase text-slate-400 font-mono tracking-wider">Demonstrativo de Holerite Digital (Prévia Real)</span>
+                    <span className="px-2 py-0.5 bg-blue-600 text-white text-[8px] font-black uppercase rounded font-mono">Prévia Viva</span>
                   </div>
                   <div className="bg-white border border-black text-black font-mono text-[9px] w-full select-none leading-none">
                     {(() => {
                       const totalVencimentos = previewCalc.totalAdditions;
-                      const inssAmount = previewCalc.taxes.find(t => t.name.toUpperCase()?.includes('INSS'))?.amount || 0;
-                      const irpfAmount = previewCalc.taxes.find(t => t.name.toUpperCase()?.includes('IRPF'))?.amount || 0;
                       const totalDescontos = previewCalc.totalDeductions;
-                      const fgtsBase = totalVencimentos;
-                      const fgtsAmount = fgtsBase * 0.08;
-                      const irpfBase = Math.max(0, totalVencimentos - inssAmount);
+                      const fgtsBase = previewCalc.baseFgts;
+                      const fgtsAmount = previewCalc.fgtsMes;
+                      const irpfBase = previewCalc.baseIrrf;
 
                       if (previewCalc.isVacation) {
                         const formatDateBR = (dateStr: string) => {
@@ -2746,8 +3308,13 @@ export default function MySalarySlips() {
                               </div>
                             </div>
                             <div className="col-span-3 p-2 flex flex-col justify-between text-right h-14">
-                              <div className="font-bold text-[7.5px] text-zinc-900 leading-none uppercase">
-                                Folha Mensal
+                              <div>
+                                <div className="font-bold text-[7.5px] text-zinc-900 leading-none uppercase">
+                                  Folha Mensal
+                                </div>
+                                <div className="text-[6.5px] font-bold text-blue-900 mt-0.5 tracking-tight">
+                                  Cópia do Colaborador • Salva no App
+                                </div>
                               </div>
                               <div className="font-extrabold text-[8.5px] text-black">
                                 {months[Number(newSlipForm.month) - 1]?.toUpperCase()} de {newSlipForm.year}
@@ -2812,63 +3379,23 @@ export default function MySalarySlips() {
                             </div>
 
                             <div className="relative z-10">
-                              {/* 1. Base Salary */}
-                              <div className="grid grid-cols-12 px-1 py-0.5 text-zinc-950">
-                                <div className="col-span-1 text-center font-bold text-zinc-700">8781</div>
-                                <div className="col-span-5 uppercase pl-3">DIAS NORMAIS</div>
-                                <div className="col-span-2 text-right text-zinc-800 pr-3">30,00</div>
-                                <div className="col-span-2 text-right font-black pr-3">{formatNumber(previewCalc.baseSalary)}</div>
-                                <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
-                              </div>
-
-                              {/* 2. Additions */}
-                              {previewCalc.taxes.filter(t => t.type === 'addition').map((a, idx) => (
-                                <div className="grid grid-cols-12 px-1 py-0.5 text-zinc-950" key={`prev-add-${idx}`}>
-                                  <div className="col-span-1 text-center font-bold text-zinc-700">
-                                    {getRubricCode(a.name, '205')}
-                                  </div>
-                                  <div className="col-span-5 uppercase pl-3 truncate">{a.name}</div>
-                                  <div className="col-span-2 text-right text-zinc-800 pr-3">
-                                    {a.name.includes('HORAS EXTRAS') ? '7:30' : '-'}
-                                  </div>
-                                  <div className="col-span-2 text-right font-black pr-3">{formatNumber(a.amount)}</div>
-                                  <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
-                                </div>
-                              ))}
-
-                              {/* 3. Deductions */}
-                              {previewCalc.taxes.filter(t => t.type === 'deduction').map((t, idx) => {
-                                const isINSS = t.name.toUpperCase().includes('INSS');
-                                const isIRPF = t.name.toUpperCase().includes('IRPF') || t.name.toUpperCase().includes('IMPOSTO');
-                                let refVal = '-';
-                                if (isINSS) refVal = '7,90';
-                                else if (isIRPF) refVal = '7,50';
-
+                              {newSlipItems.map((item, idx) => {
+                                const isAdd = item.type === 'addition';
+                                const isInfo = item.type === 'info' || item.code === '9382' || item.code === '9392';
                                 return (
-                                  <div className="grid grid-cols-12 px-1 py-0.5 text-zinc-950" key={`prev-ded-${idx}`}>
-                                    <div className="col-span-1 text-center font-bold text-zinc-700">
-                                      {getRubricCode(t.name, isINSS ? '998' : '508')}
+                                  <div className="grid grid-cols-12 px-1 py-0.5 text-zinc-950 hover:bg-blue-50/20" key={item.id || idx}>
+                                    <div className="col-span-1 text-center font-bold text-zinc-700">{item.code || '---'}</div>
+                                    <div className="col-span-5 uppercase pl-3 truncate font-medium">{item.description}</div>
+                                    <div className="col-span-2 text-right text-zinc-800 pr-3">{item.reference || '-'}</div>
+                                    <div className="col-span-2 text-right font-black pr-3">
+                                      {isInfo ? <span className="text-zinc-300">-</span> : (isAdd ? formatNumber(item.amount) : <span className="text-zinc-300">-</span>)}
                                     </div>
-                                    <div className="col-span-5 uppercase pl-3 truncate">{t.name}</div>
-                                    <div className="col-span-2 text-right text-zinc-800 pr-3">{refVal}</div>
-                                    <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
-                                    <div className="col-span-2 text-right font-black text-red-650 pr-3">{formatNumber(t.amount)}</div>
+                                    <div className="col-span-2 text-right font-black pr-3">
+                                      {isInfo ? <span className="text-zinc-300">-</span> : (!isAdd ? <span className="text-red-650">{formatNumber(item.amount)}</span> : <span className="text-zinc-300">-</span>)}
+                                    </div>
                                   </div>
                                 );
                               })}
-
-                              {/* 4. Manual Discounts */}
-                              {previewCalc.discounts.map((d, idx) => (
-                                <div className="grid grid-cols-12 px-1 py-0.5 text-zinc-950" key={`prev-disc-${idx}`}>
-                                  <div className="col-span-1 text-center font-bold text-zinc-700">
-                                    {getRubricCode(d.name, '620')}
-                                  </div>
-                                  <div className="col-span-5 uppercase pl-3 truncate">{d.name}</div>
-                                  <div className="col-span-2 text-right text-zinc-800 pr-3">-</div>
-                                  <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
-                                  <div className="col-span-2 text-right font-black text-red-650 pr-3">{formatNumber(d.amount)}</div>
-                                </div>
-                              ))}
                             </div>
                           </div>
 
@@ -2894,7 +3421,7 @@ export default function MySalarySlips() {
                             </div>
                           </div>
 
-                          {/* ROW 7: REAL FOOTER CALCULATIONS STRIP */}
+                          {/* ROW 7: REAL FOOTER CALCULATIONS STRIP (EXACT 6 CLT BASES) */}
                           <div className="grid grid-cols-12 text-[7px] text-center bg-zinc-50 uppercase divide-x divide-black h-8 leading-tight">
                             <div className="col-span-2 p-0.5 flex flex-col justify-between">
                               <span className="block text-[5.5px] font-bold text-zinc-500">Salário Base</span>
@@ -2902,23 +3429,23 @@ export default function MySalarySlips() {
                             </div>
                             <div className="col-span-2 p-0.5 flex flex-col justify-between">
                               <span className="block text-[5.5px] font-bold text-zinc-500">Sal. Contr. INSS</span>
-                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(totalVencimentos)}</span>
+                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(previewCalc.salContrInss)}</span>
                             </div>
                             <div className="col-span-2 p-0.5 flex flex-col justify-between">
                               <span className="block text-[5.5px] font-bold text-zinc-500">Base Calc. FGTS</span>
-                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(totalVencimentos)}</span>
+                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(previewCalc.baseFgts)}</span>
                             </div>
                             <div className="col-span-2 p-0.5 flex flex-col justify-between">
                               <span className="block text-[5.5px] font-bold text-zinc-500">F.G.T.S do Mês</span>
-                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(fgtsAmount)}</span>
+                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(previewCalc.fgtsMes)}</span>
                             </div>
                             <div className="col-span-2 p-0.5 flex flex-col justify-between">
                               <span className="block text-[5.5px] font-bold text-zinc-500">Base Calc. IRPF</span>
-                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(irpfBase)}</span>
+                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{formatNumber(previewCalc.baseIrrf)}</span>
                             </div>
                             <div className="col-span-2 p-0.5 flex flex-col justify-between">
                               <span className="block text-[5.5px] font-bold text-zinc-500">Faixa IRPF</span>
-                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{irpfAmount > 0 ? formatNumber(irpfAmount) : '0,00'}</span>
+                              <span className="font-extrabold text-[7.5px] font-mono leading-none">{previewCalc.faixaIrrf}</span>
                             </div>
                           </div>
                         </>
@@ -2945,6 +3472,205 @@ export default function MySalarySlips() {
                 <Send className="w-4 h-4 animate-bounce" style={{ animationDuration: '3s' }} />
                 Despachar e Enviar Holerite
               </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* CATALOGO DE RUBRICAS MODAL */}
+      <AnimatePresence>
+        {showRubricsCatalogModal && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/65 backdrop-blur-sm p-4 overflow-y-auto">
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white rounded-[2.5rem] p-6 lg:p-8 max-w-2xl w-full border border-slate-100 shadow-2xl relative my-8"
+            >
+              <button 
+                onClick={() => setShowRubricsCatalogModal(false)}
+                className="absolute top-6 right-6 p-2 rounded-xl hover:bg-slate-50 text-slate-400 hover:text-slate-600 transition-all cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="mb-6 pr-8">
+                <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                  <BookOpen className="w-6 h-6 text-blue-600" />
+                  Catálogo Oficial de Rubricas & Códigos
+                </h3>
+                <p className="text-slate-500 text-xs mt-1">
+                  Cadastre todos os códigos e descrições das rubricas da empresa. Eles ficarão salvos e disponíveis para qualquer geração de contra-cheque.
+                </p>
+              </div>
+
+              {/* Form to add a new rubric to the catalog */}
+              <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 space-y-3 mb-6">
+                <h4 className="text-xs font-black text-slate-800 uppercase tracking-wide flex items-center gap-1.5">
+                  <Plus className="w-4 h-4 text-blue-600" />
+                  Cadastrar Novo Código & Descrição
+                </h4>
+
+                <div className="grid grid-cols-12 gap-3">
+                  <div className="col-span-3">
+                    <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Código *</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: 0180"
+                      value={newRubricForm.code}
+                      onChange={(e) => setNewRubricForm({ ...newRubricForm, code: e.target.value })}
+                      className="w-full text-xs font-bold bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-800 uppercase"
+                    />
+                  </div>
+                  <div className="col-span-6">
+                    <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Descrição Oficial *</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: COMISSÃO DE VENDAS"
+                      value={newRubricForm.name}
+                      onChange={(e) => setNewRubricForm({ ...newRubricForm, name: e.target.value })}
+                      className="w-full text-xs font-bold bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-800 uppercase"
+                    />
+                  </div>
+                  <div className="col-span-3">
+                    <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Ref. Padrão</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: 5,00%"
+                      value={newRubricForm.defaultReference}
+                      onChange={(e) => setNewRubricForm({ ...newRubricForm, defaultReference: e.target.value })}
+                      className="w-full text-xs font-bold bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-800"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between pt-1">
+                  <div className="flex items-center gap-4 text-xs font-bold">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="newRubricType"
+                        checked={newRubricForm.type === 'addition'}
+                        onChange={() => setNewRubricForm({ ...newRubricForm, type: 'addition' })}
+                        className="text-blue-600 focus:ring-0 w-3.5 h-3.5"
+                      />
+                      <span className="text-emerald-700">Vencimento (Provento +)</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="newRubricType"
+                        checked={newRubricForm.type === 'deduction'}
+                        onChange={() => setNewRubricForm({ ...newRubricForm, type: 'deduction' })}
+                        className="text-blue-600 focus:ring-0 w-3.5 h-3.5"
+                      />
+                      <span className="text-red-650">Desconto (Dedução -)</span>
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="newRubricType"
+                        checked={newRubricForm.type === 'info'}
+                        onChange={() => setNewRubricForm({ ...newRubricForm, type: 'info' })}
+                        className="text-blue-600 focus:ring-0 w-3.5 h-3.5"
+                      />
+                      <span className="text-blue-700">Somente Referência (Informativa)</span>
+                    </label>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveCustomRubric}
+                    disabled={savingRubric}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-black cursor-pointer shadow-sm transition-all flex items-center gap-1.5"
+                  >
+                    {savingRubric ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                    Salvar Rubrica no Catálogo
+                  </button>
+                </div>
+              </div>
+
+              {/* Rubrics List & Search */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-xs font-black text-slate-700 uppercase tracking-wide">
+                    Rubricas Cadastradas no Sistema ({allRubrics.length})
+                  </h4>
+                  <div className="relative w-48">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                    <input
+                      type="text"
+                      placeholder="Filtrar por código ou nome..."
+                      value={catalogSearch}
+                      onChange={(e) => setCatalogSearch(e.target.value)}
+                      className="w-full text-[11px] bg-slate-50 border border-slate-200 rounded-xl pl-8 pr-3 py-1.5 focus:bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded-2xl bg-white">
+                  {allRubrics
+                    .filter(r => {
+                      if (!catalogSearch.trim()) return true;
+                      const s = catalogSearch.toUpperCase();
+                      return r.code.includes(s) || r.name.toUpperCase().includes(s);
+                    })
+                    .map((r) => {
+                      const isCustom = !r.isSystem;
+                      return (
+                        <div key={r.code} className="p-3 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono font-black text-xs px-2 py-0.5 bg-slate-100 border border-slate-200 rounded-md text-slate-800">
+                              {r.code}
+                            </span>
+                            <div>
+                              <p className="font-bold text-xs text-slate-900 leading-tight">{r.name}</p>
+                              <div className="flex items-center gap-2 mt-0.5">
+                                <span className={cn(
+                                  "text-[8px] font-black uppercase px-1.5 py-0.2 rounded",
+                                  r.type === 'addition' ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+                                )}>
+                                  {r.type === 'addition' ? 'Vencimento' : 'Desconto'}
+                                </span>
+                                {r.defaultReference && (
+                                  <span className="text-[9px] text-slate-400">Ref: {r.defaultReference}</span>
+                                )}
+                                {isCustom ? (
+                                  <span className="text-[8px] font-bold text-blue-600 bg-blue-50 px-1 rounded">Personalizada</span>
+                                ) : (
+                                  <span className="text-[8px] font-bold text-slate-400 bg-slate-100 px-1 rounded">Padrão CLT</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSelectCatalogRubric(`${r.code}:::${r.type}`);
+                                setShowRubricsCatalogModal(false);
+                              }}
+                              className="px-2.5 py-1 bg-slate-100 hover:bg-blue-600 hover:text-white text-slate-700 rounded-lg text-[10px] font-bold transition-colors cursor-pointer"
+                            >
+                              Inserir no Holerite
+                            </button>
+                            {isCustom && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteCustomRubric(r.id)}
+                                className="p-1 text-slate-400 hover:text-red-500 cursor-pointer"
+                                title="Excluir do catálogo"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                </div>
+              </div>
             </motion.div>
           </div>
         )}

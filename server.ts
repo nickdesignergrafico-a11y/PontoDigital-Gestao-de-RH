@@ -315,7 +315,9 @@ async function startServer() {
                 items: {
                   type: Type.OBJECT,
                   properties: {
+                    code: { type: Type.STRING, description: "Código da rubrica (ex: 8781, 0150, 0205) se presente" },
                     name: { type: Type.STRING, description: "Descrição do adicional/provento" },
+                    reference: { type: Type.STRING, description: "Referência da rubrica (ex: 30,00, 7:30, 20%) se presente" },
                     amount: { type: Type.NUMBER, description: "Valor do adicional" }
                   },
                   required: ["name", "amount"]
@@ -327,7 +329,9 @@ async function startServer() {
                 items: {
                   type: Type.OBJECT,
                   properties: {
+                    code: { type: Type.STRING, description: "Código da rubrica (ex: 998, 508, 0201) se presente" },
                     name: { type: Type.STRING, description: "Descrição do desconto" },
+                    reference: { type: Type.STRING, description: "Referência da rubrica (ex: 7,90, 7,50, 6%, 1%) se presente" },
                     amount: { type: Type.NUMBER, description: "Valor do desconto" }
                   },
                   required: ["name", "amount"]
