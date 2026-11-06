@@ -79,3 +79,67 @@ self.addEventListener('fetch', event => {
       })
   );
 });
+
+// Suporte a Push Notifications via Web Push / Service Worker
+self.addEventListener('push', event => {
+  let data = {};
+  if (event.data) {
+    try {
+      data = event.data.json();
+    } catch {
+      data = { title: 'Ponto Digital', message: event.data.text() };
+    }
+  }
+
+  const title = data.notification?.title || data.title || '📌 Ponto Digital';
+  const body = data.notification?.body || data.message || data.body || 'Você possui uma nova notificação.';
+  const link = data.data?.link || data.link || '/#notifications';
+
+  const options = {
+    body,
+    icon: '/pwa-icon.png',
+    badge: '/pwa-icon.png',
+    vibrate: [150, 80, 150],
+    data: { link },
+    tag: 'ponto-digital-push',
+    renotify: true
+  };
+
+  // Atualiza contador no ícone do aplicativo
+  if (self.navigator && 'setAppBadge' in self.navigator) {
+    const unread = parseInt(data.data?.unreadCount || data.unreadCount || '1', 10);
+    if (!isNaN(unread) && unread > 0) {
+      self.navigator.setAppBadge(unread).catch(() => {});
+    } else {
+      self.navigator.setAppBadge().catch(() => {});
+    }
+  }
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+
+  if (self.navigator && 'clearAppBadge' in self.navigator) {
+    self.navigator.clearAppBadge().catch(() => {});
+  }
+
+  const targetLink = event.notification.data?.link || '/';
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(windowClients => {
+      for (const client of windowClients) {
+        if ('focus' in client) {
+          if (client.url && client.url.includes(self.location.origin)) {
+            client.navigate(targetLink);
+            return client.focus();
+          }
+        }
+      }
+      if (clients.openWindow) {
+        return clients.openWindow(targetLink);
+      }
+    })
+  );
+});
+

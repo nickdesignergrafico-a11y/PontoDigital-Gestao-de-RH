@@ -12,7 +12,8 @@ import {
   orderBy, 
   where,
   serverTimestamp,
-  updateDoc
+  updateDoc,
+  deleteDoc
 } from 'firebase/firestore';
 import { 
   Send, 
@@ -23,6 +24,7 @@ import {
   Clock, 
   ArrowLeft,
   Users,
+  Trash2,
   ShieldAlert,
   HelpCircle,
   Sparkles,
@@ -287,6 +289,17 @@ export default function ChatManager() {
       });
     } catch (err) {
       console.error("Error sending chat message:", err);
+    }
+  };
+
+  // 5.1 Excluir mensagem do chat
+  const handleDeleteChatMessage = async (msgId: string) => {
+    if (!activeRoom || !user || !msgId) return;
+    if (!confirm("Deseja realmente apagar esta mensagem do chat?")) return;
+    try {
+      await deleteDoc(doc(db, 'chatRooms', activeRoom.id, 'messages', msgId));
+    } catch (err) {
+      console.error("Erro ao excluir mensagem do chat:", err);
     }
   };
 
@@ -592,12 +605,27 @@ export default function ChatManager() {
                           </div>
                           
                           <div className={cn(
-                            "p-3 rounded-2xl shadow-sm text-sm break-words border",
+                            "p-3 rounded-2xl shadow-sm text-sm break-words border relative group/bubble",
                             isMe 
                               ? "bg-blue-600 text-white rounded-tr-none border-blue-700" 
                               : "bg-white text-slate-800 rounded-tl-none border-slate-100"
                           )}>
                             <p className="whitespace-pre-line font-medium leading-relaxed">{message.text}</p>
+                            
+                            {(isMe || user?.role === 'admin') && message.id && (
+                              <button
+                                onClick={() => handleDeleteChatMessage(message.id)}
+                                className={cn(
+                                  "absolute -top-2 p-1 rounded-full shadow-md transition-all opacity-0 group-hover/bubble:opacity-100 cursor-pointer active:scale-95",
+                                  isMe 
+                                    ? "-left-3 bg-white text-rose-600 hover:bg-rose-50 border border-slate-200" 
+                                    : "-right-3 bg-white text-rose-600 hover:bg-rose-50 border border-slate-200"
+                                )}
+                                title="Excluir mensagem"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </button>
+                            )}
                           </div>
                         </div>
                       </div>

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { initializeApp, deleteApp } from 'firebase/app';
 import { getAuth, createUserWithEmailAndPassword, signOut, sendPasswordResetEmail } from 'firebase/auth';
-import { collection, query, getDocs, doc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { collection, query, getDocs, doc, setDoc, updateDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
 import { db, auth, storage } from '../../lib/firebase';
 import firebaseConfig from '../../../firebase-applet-config.json';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
@@ -67,8 +67,17 @@ export default function UserManagement({
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [selectedPhotoFile, setSelectedPhotoFile] = useState<File | null>(null);
 
+  const [servicePosts, setServicePosts] = useState<{ id: string; name: string }[]>([]);
+
   useEffect(() => {
     fetchUsers();
+    const unsubPosts = onSnapshot(collection(db, 'servicePosts'), (snapshot) => {
+      const posts = snapshot.docs
+        .map(d => ({ id: d.id, name: (d.data().name || '').trim() }))
+        .filter(p => Boolean(p.name));
+      setServicePosts(posts);
+    });
+    return () => unsubPosts();
   }, []);
 
   const fetchUsers = async () => {
@@ -911,14 +920,69 @@ export default function UserManagement({
                       value={formData.department}
                       onChange={e => setFormData({...formData, department: e.target.value})}
                     />
-                    <input 
-                      type="text" placeholder="Posto de Trabalho Ativo" 
-                      name="new_collaborator_posto_name"
-                      autoComplete="off"
-                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 font-bold" 
-                      value={formData.postoName}
-                      onChange={e => setFormData({...formData, postoName: e.target.value})}
-                    />
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[10px] font-black uppercase text-slate-500 ml-1">
+                          Posto de Trabalho (CC do Holerite)
+                        </label>
+                        <span className="text-[9px] text-blue-600 font-bold">
+                          Ex: Maestro Locadora De, RSN Logistica
+                        </span>
+                      </div>
+                      <input 
+                        type="text" 
+                        list="admin-user-posts-list"
+                        placeholder="Posto de Trabalho Ativo (ex: MAESTRO LOCADORA DE)" 
+                        name="new_collaborator_posto_name"
+                        autoComplete="off"
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 font-bold uppercase placeholder:normal-case placeholder:font-normal text-slate-800" 
+                        value={formData.postoName}
+                        onChange={e => setFormData({...formData, postoName: e.target.value})}
+                      />
+                      <datalist id="admin-user-posts-list">
+                        {servicePosts.map(p => (
+                          <option key={p.id} value={p.name} />
+                        ))}
+                        <option value="MAESTRO LOCADORA DE" />
+                        <option value="RSN LOGISTICA" />
+                        <option value="PORTARIA PRINCIPAL" />
+                      </datalist>
+                      <div className="flex flex-wrap gap-1.5 pt-0.5">
+                        {['MAESTRO LOCADORA DE', 'RSN LOGISTICA'].map(quickPost => (
+                          <button
+                            key={quickPost}
+                            type="button"
+                            onClick={() => setFormData({ ...formData, postoName: quickPost })}
+                            className={cn(
+                              "text-[9px] font-extrabold px-2 py-0.5 rounded-lg border transition-all cursor-pointer",
+                              formData.postoName?.toUpperCase() === quickPost
+                                ? "bg-blue-600 text-white border-blue-600"
+                                : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                            )}
+                          >
+                            + {quickPost}
+                          </button>
+                        ))}
+                        {servicePosts
+                          .filter(p => !['MAESTRO LOCADORA DE', 'RSN LOGISTICA'].includes(p.name.toUpperCase()))
+                          .slice(0, 3)
+                          .map(p => (
+                            <button
+                              key={p.id}
+                              type="button"
+                              onClick={() => setFormData({ ...formData, postoName: p.name.toUpperCase() })}
+                              className={cn(
+                                "text-[9px] font-extrabold px-2 py-0.5 rounded-lg border transition-all cursor-pointer",
+                                formData.postoName?.toUpperCase() === p.name.toUpperCase()
+                                  ? "bg-blue-600 text-white border-blue-600"
+                                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-100"
+                              )}
+                            >
+                              + {p.name.toUpperCase()}
+                            </button>
+                          ))}
+                      </div>
+                    </div>
                     <div className="space-y-1">
                       <label className="text-[10px] font-black uppercase text-slate-500 ml-1 flex items-center justify-between">
                         <span>Salário Base</span>

@@ -28,7 +28,8 @@ import {
   BookOpen,
   User as UserIcon,
   RefreshCw,
-  UserCheck
+  UserCheck,
+  Bell
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../../lib/utils';
@@ -54,13 +55,15 @@ import MyProfile from '../employee/MyProfile';
 import MyBenefits from '../employee/MyBenefits';
 import MealAllowanceReceipts from '../employee/MealAllowanceReceipts';
 import NotificationTray from '../notifications/NotificationTray';
+import EmployeeNotifications from '../employee/EmployeeNotifications';
 import TimecardSheet from '../employee/TimecardSheet';
 import ChatManager from '../chat/ChatManager';
 import OccurrenceBook from '../occurrences/OccurrenceBook';
 import ShiftBook from '../occurrences/ShiftBook';
 import SignedTimecards from '../employee/SignedTimecards';
+import { useAppBadge } from '../../hooks/useAppBadge';
 
-type View = 'home' | 'users' | 'punch' | 'requests' | 'payroll' | 'reports' | 'orders' | 'config' | 'timecard' | 'benefits' | 'chat' | 'timecard_receipts' | 'benefit_receipts' | 'admin_vacations' | 'occurrences' | 'signed_timecards' | 'shift_book' | 'service_posts' | 'blank_timecard' | 'profile';
+type View = 'home' | 'users' | 'punch' | 'requests' | 'payroll' | 'reports' | 'orders' | 'config' | 'timecard' | 'benefits' | 'chat' | 'timecard_receipts' | 'benefit_receipts' | 'admin_vacations' | 'occurrences' | 'signed_timecards' | 'shift_book' | 'service_posts' | 'blank_timecard' | 'profile' | 'notifications';
 
 export default function Dashboard() {
   const { user, switchAdminUser } = useAuth();
@@ -103,6 +106,10 @@ export default function Dashboard() {
   // States to hold counts of pending documents for alignment indicators
   const [pendingSlipsCount, setPendingSlipsCount] = useState<number>(0);
   const [pendingBenefitsCount, setPendingBenefitsCount] = useState<number>(0);
+  const [pendingNotificationsCount, setPendingNotificationsCount] = useState<number>(0);
+
+  // Mantém o contador do ícone do aplicativo sempre sincronizado
+  useAppBadge(pendingNotificationsCount);
 
   // PWA states
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -175,12 +182,33 @@ export default function Dashboard() {
     return () => window.removeEventListener('switch-dashboard-view', handleSwitch);
   }, []);
 
-  // Listen to pending documents for current employee
+  // Listen to pending documents and notifications
   useEffect(() => {
-    if (!user || isAdmin) {
+    if (!user) {
       setPendingSlipsCount(0);
       setPendingBenefitsCount(0);
+      setPendingNotificationsCount(0);
       return;
+    }
+
+    // Escuta notificações não lidas para o contador de mensagens no ícone do app
+    const notifsQuery = query(
+      collection(db, 'notifications'),
+      where('userId', '==', user.uid),
+      where('read', '==', false)
+    );
+    const unsubscribeNotifs = onSnapshot(notifsQuery, (snapshot) => {
+      setPendingNotificationsCount(snapshot.size);
+    }, (error) => {
+      console.error("Error listening to unread notifications:", error);
+    });
+
+    if (isAdmin) {
+      setPendingSlipsCount(0);
+      setPendingBenefitsCount(0);
+      return () => {
+        unsubscribeNotifs();
+      };
     }
 
     const slipsQuery = query(
@@ -206,6 +234,7 @@ export default function Dashboard() {
     });
 
     return () => {
+      unsubscribeNotifs();
       unsubscribeSlips();
       unsubscribeBenefits();
     };
@@ -213,6 +242,7 @@ export default function Dashboard() {
 
   const menuItems = isAdmin ? [
     { id: 'home', label: 'Painel', icon: BarChart3 },
+    { id: 'notifications', label: 'Mensagens & Alertas', icon: Bell },
     { id: 'users', label: 'Colaboradores', icon: Users },
     { id: 'timecard_receipts', label: 'Recebimento de Folhas', icon: FileSpreadsheet },
     { id: 'blank_timecard', label: 'Folha em Branco', icon: FileText },
@@ -231,6 +261,7 @@ export default function Dashboard() {
     { id: 'config', label: 'Configuração', icon: Settings },
   ] : [
     { id: 'home', label: 'Início', icon: Home },
+    { id: 'notifications', label: 'Mensagens', icon: Bell },
     { id: 'punch', label: 'Registrar Ponto', icon: Clock },
     { id: 'timecard', label: 'Folha de Ponto', icon: FileSpreadsheet },
     { id: 'blank_timecard', label: 'Folha em Branco', icon: FileText },
@@ -388,6 +419,8 @@ export default function Dashboard() {
         return <ServicePostsManagement />;
       case 'blank_timecard':
         return <BlankTimecardManager />;
+      case 'notifications':
+        return <EmployeeNotifications onNavigate={setCurrentView} />;
       case 'profile':
         return <MyProfile />;
       case 'config':
@@ -464,11 +497,16 @@ export default function Dashboard() {
 
         <div className="px-4 py-6 md:py-2 flex-1 space-y-2 overflow-y-auto">
           {menuItems.map((item) => {
-            const showBadge = !isAdmin && (
-              (item.id === 'payroll' && pendingSlipsCount > 0) ||
-              (item.id === 'benefit_receipts' && pendingBenefitsCount > 0)
+            const showBadge = (
+              (!isAdmin && item.id === 'payroll' && pendingSlipsCount > 0) ||
+              (!isAdmin && item.id === 'benefit_receipts' && pendingBenefitsCount > 0) ||
+              (item.id === 'notifications' && pendingNotificationsCount > 0)
             );
-            const badgeCount = item.id === 'payroll' ? pendingSlipsCount : pendingBenefitsCount;
+            const badgeCount = item.id === 'payroll' 
+              ? pendingSlipsCount 
+              : item.id === 'benefit_receipts' 
+              ? pendingBenefitsCount 
+              : pendingNotificationsCount;
 
             return (
               <button

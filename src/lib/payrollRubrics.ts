@@ -269,3 +269,43 @@ export function calculatePayrollTotals(items: SalarySlipLineItem[], fallbackBase
     inssValorCalculado: autoInss.inss
   };
 }
+
+/**
+ * Remove rubricas duplicadas mantendo a ordem e priorizando dados válidos
+ */
+export function deduplicateSlipItems(items: SalarySlipLineItem[]): SalarySlipLineItem[] {
+  if (!Array.isArray(items)) return [];
+  const map = new Map<string, SalarySlipLineItem>();
+
+  for (const it of items) {
+    if (!it) continue;
+    const code = (it.code || '').trim();
+    const desc = (it.description || '').trim().toUpperCase();
+
+    let key = code ? `code_${code}` : `desc_${desc}_${it.type}`;
+    if (code === '8781' || desc.includes('DIAS NORMAIS') || desc.includes('SALÁRIO BASE') || desc.includes('SALARIO BASE')) {
+      key = 'base_salary_8781';
+    } else if (code === '9382' || code === '9392' || desc.includes('VALE ALIMENTA')) {
+      key = 'info_vale_alimentacao_9382';
+    }
+
+    if (!map.has(key)) {
+      map.set(key, { ...it });
+    } else {
+      // Merge values: keep whichever has non-zero amount or more specific reference
+      const existing = map.get(key)!;
+      const amount = it.amount > 0 ? it.amount : existing.amount;
+      const reference = (it.reference && it.reference !== '-') ? it.reference : existing.reference;
+      const finalCode = (it.code && it.code !== '---') ? it.code : existing.code;
+      map.set(key, {
+        ...existing,
+        code: finalCode,
+        amount,
+        reference
+      });
+    }
+  }
+
+  return Array.from(map.values());
+}
+

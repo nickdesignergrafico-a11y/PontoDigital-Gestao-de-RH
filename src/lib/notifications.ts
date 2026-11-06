@@ -1,9 +1,25 @@
-import { collection, addDoc, serverTimestamp, doc, updateDoc, arrayUnion } from 'firebase/firestore';
-import { getToken } from 'firebase/messaging';
+import { 
+  collection, 
+  addDoc, 
+  serverTimestamp, 
+  doc, 
+  updateDoc, 
+  arrayUnion, 
+  deleteDoc, 
+  query, 
+  where, 
+  getDocs, 
+  writeBatch 
+} from 'firebase/firestore';
+import { getToken, onMessage } from 'firebase/messaging';
 import { db, getFirebaseMessaging } from './firebase';
+import { updateAllAppBadges } from './badgeManager';
 
 export type NotificationType = 'info' | 'success' | 'warning' | 'error';
 
+/**
+ * Cria uma notificação no Firestore e dispara o envio de Push Notification via Firebase FCM
+ */
 export const createNotification = async (
   userId: string,
   title: string,
@@ -12,6 +28,7 @@ export const createNotification = async (
   link?: string
 ) => {
   try {
+    // 1. Grava no Firestore para histórico do colaborador
     await addDoc(collection(db, 'notifications'), {
       userId,
       title,
@@ -21,16 +38,37 @@ export const createNotification = async (
       link: link || '',
       createdAt: serverTimestamp(),
     });
+
+    // 2. Dispara Push Notification em background via Firebase FCM através do backend
+    fetch('/api/push/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        targetUserIds: [userId],
+        title,
+        message,
+        type,
+        link: link || '/#notifications'
+      })
+    }).catch(err => {
+      console.warn('Disparo de Push FCM em segundo plano:', err);
+    });
+
   } catch (error) {
     console.error('Error creating notification:', error);
   }
 };
 
-// Obtém o token do Firebase Cloud Messaging (FCM) e salva no perfil do usuário no Firestore
+/**
+ * Obtém o token do Firebase Cloud Messaging (FCM) e salva no perfil do usuário no Firestore
+ */
 export const requestAndSaveFCMToken = async (userId: string, vapidKey?: string): Promise<string | null> => {
   try {
     const messaging = await getFirebaseMessaging();
-    if (!messaging) return null;
+    if (!messaging) {
+      console.warn('Firebase Messaging não suportado neste navegador.');
+      return null;
+    }
 
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') {
@@ -38,10 +76,16 @@ export const requestAndSaveFCMToken = async (userId: string, vapidKey?: string):
       return null;
     }
 
-    // Registra Service Worker se necessário
-    let swRegistration;
+    // Registra o Service Worker dedicado para FCM se suportado
+    let swRegistration: ServiceWorkerRegistration | undefined;
     if ('serviceWorker' in navigator) {
-      swRegistration = await navigator.serviceWorker.ready.catch(() => undefined);
+      try {
+        swRegistration = await navigator.serviceWorker.register('/firebase-messaging-sw.js', { scope: '/' });
+        await navigator.serviceWorker.ready;
+      } catch (swErr) {
+        console.warn('Aviso no registro do worker FCM, tentando registro padrão:', swErr);
+        swRegistration = await navigator.serviceWorker.ready.catch(() => undefined);
+      }
     }
 
     const token = await getToken(messaging, {
@@ -54,6 +98,7 @@ export const requestAndSaveFCMToken = async (userId: string, vapidKey?: string):
       await updateDoc(userRef, {
         fcmToken: token,
         fcmTokens: arrayUnion(token),
+        pushEnabled: true,
         lastFCMTokenUpdate: new Date().toISOString()
       }).catch(err => {
         console.warn('Erro ao atualizar fcmToken no Firestore:', err);
@@ -67,7 +112,29 @@ export const requestAndSaveFCMToken = async (userId: string, vapidKey?: string):
   return null;
 };
 
-// Solicita permissão para notificações do navegador (Push local)
+/**
+ * Ouve mensagens FCM em primeiro plano (quando a tela do app está aberta)
+ */
+export const listenToForegroundFCM = async (onMessageCallback: (payload: any) => void) => {
+  try {
+    const messaging = await getFirebaseMessaging();
+    if (!messaging) return () => {};
+
+    const unsubscribe = onMessage(messaging, (payload) => {
+      console.log('[FCM] Mensagem recebida em primeiro plano:', payload);
+      onMessageCallback(payload);
+    });
+
+    return unsubscribe;
+  } catch (err) {
+    console.warn('Erro ao escutar mensagens FCM em primeiro plano:', err);
+    return () => {};
+  }
+};
+
+/**
+ * Solicita permissão para notificações do navegador (Push local e Firebase)
+ */
 export const requestNotificationPermission = async (): Promise<NotificationPermission> => {
   if (typeof window !== 'undefined' && 'Notification' in window) {
     if (Notification.permission === 'default') {
@@ -84,7 +151,9 @@ export const requestNotificationPermission = async (): Promise<NotificationPermi
   return 'denied';
 };
 
-// Dispara uma notificação nativa do sistema/navegador (Push)
+/**
+ * Dispara uma notificação nativa do sistema/navegador (Push local)
+ */
 export const sendBrowserNotification = (title: string, body: string, link?: string) => {
   // Ponte Kodular/AppInventor WebViewString para disparar o Notifier nativo no APK
   if (typeof window !== 'undefined' && (window as any).AppInventor) {
@@ -105,10 +174,11 @@ export const sendBrowserNotification = (title: string, body: string, link?: stri
     try {
       const options: any = {
         body,
-        icon: '/favicon.ico',
-        badge: '/favicon.ico',
+        icon: '/pwa-icon.png',
+        badge: '/pwa-icon.png',
         tag: 'ponto-digital-alert',
         renotify: true,
+        vibrate: [150, 80, 150]
       };
       
       const notification = new Notification(title, options);
@@ -116,8 +186,8 @@ export const sendBrowserNotification = (title: string, body: string, link?: stri
       notification.onclick = () => {
         window.focus();
         if (link) {
-          // Se houver links profundos ou rotas redireciona
-          window.location.hash = link;
+          const sanitized = link.startsWith('#') ? link.substring(1) : link;
+          window.location.hash = sanitized;
         }
       };
     } catch (err) {
@@ -126,4 +196,98 @@ export const sendBrowserNotification = (title: string, body: string, link?: stri
   }
 };
 
+/**
+ * Exclui uma notificação específica do Firestore
+ */
+export const deleteNotification = async (id: string): Promise<boolean> => {
+  try {
+    await deleteDoc(doc(db, 'notifications', id));
+    return true;
+  } catch (err) {
+    console.error('Erro ao excluir notificação:', err);
+    return false;
+  }
+};
 
+/**
+ * Exclui múltiplas notificações por lista de IDs
+ */
+export const deleteMultipleNotifications = async (ids: string[]): Promise<boolean> => {
+  if (!ids.length) return true;
+  try {
+    const batch = writeBatch(db);
+    ids.forEach((id) => {
+      batch.delete(doc(db, 'notifications', id));
+    });
+    await batch.commit();
+    return true;
+  } catch (err) {
+    console.error('Erro ao excluir lista de notificações:', err);
+    return false;
+  }
+};
+
+/**
+ * Exclui todas as notificações lidas de um usuário
+ */
+export const deleteReadNotifications = async (userId: string): Promise<boolean> => {
+  try {
+    const q = query(
+      collection(db, 'notifications'),
+      where('userId', '==', userId),
+      where('read', '==', true)
+    );
+    const snap = await getDocs(q);
+    if (snap.empty) return true;
+
+    const batch = writeBatch(db);
+    snap.docs.forEach((d) => {
+      batch.delete(d.ref);
+    });
+    await batch.commit();
+    return true;
+  } catch (err) {
+    console.error('Erro ao excluir notificações lidas:', err);
+    return false;
+  }
+};
+
+/**
+ * Exclui todas as notificações de um usuário
+ */
+export const deleteAllNotifications = async (userId: string): Promise<boolean> => {
+  try {
+    const q = query(
+      collection(db, 'notifications'),
+      where('userId', '==', userId)
+    );
+    const snap = await getDocs(q);
+    if (snap.empty) return true;
+
+    const batch = writeBatch(db);
+    snap.docs.forEach((d) => {
+      batch.delete(d.ref);
+    });
+    await batch.commit();
+    return true;
+  } catch (err) {
+    console.error('Erro ao excluir todas as notificações:', err);
+    return false;
+  }
+};
+
+/**
+ * Dispara envio de notificação push de teste para o dispositivo
+ */
+export const sendTestPush = async (uid: string, token?: string): Promise<{ success: boolean; message: string }> => {
+  try {
+    const res = await fetch('/api/push/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid, token })
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { success: false, message: err.message || 'Falha na conexão com o servidor' };
+  }
+};

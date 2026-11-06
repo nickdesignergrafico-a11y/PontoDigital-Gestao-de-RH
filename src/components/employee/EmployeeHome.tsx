@@ -27,7 +27,7 @@ import { format } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { cn, parseFirestoreTimestamp } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
-import { createNotification, requestNotificationPermission } from '../../lib/notifications';
+import { createNotification, requestNotificationPermission, requestAndSaveFCMToken } from '../../lib/notifications';
 import { calculateVacationBalance, VacationBalance } from '../../lib/vacation';
 import React from 'react';
 
@@ -77,8 +77,14 @@ export default function EmployeeHome({ onNavigate }: { onNavigate: (v: any) => v
   );
 
   const handleRequestPermission = async () => {
-    const perm = await requestNotificationPermission();
-    setPermissionStatus(perm);
+    if (user?.uid) {
+      await requestAndSaveFCMToken(user.uid);
+    } else {
+      await requestNotificationPermission();
+    }
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setPermissionStatus(Notification.permission);
+    }
   };
 
   const getRecentPunchTime = () => {
@@ -459,6 +465,7 @@ export default function EmployeeHome({ onNavigate }: { onNavigate: (v: any) => v
             <h3 className="font-bold text-slate-900 mb-4 px-2">Ações Rápidas</h3>
             <div className="space-y-3">
               {[
+                { label: 'Minhas Mensagens', icon: Bell, color: 'text-blue-600', bg: 'bg-blue-50', id: 'notifications' },
                 { label: 'Registrar Ocorrência', icon: ClipboardList, color: 'text-rose-600', bg: 'bg-rose-50', id: 'occurrences' },
                 { label: 'Livro de Turno / Ata', icon: BookOpen, color: 'text-indigo-600', bg: 'bg-indigo-50', id: 'shift_book' },
                 { label: 'Solicitar Férias', icon: Calendar, color: 'text-orange-500', bg: 'bg-orange-50', id: 'requests' },
@@ -503,15 +510,30 @@ export default function EmployeeHome({ onNavigate }: { onNavigate: (v: any) => v
           </div>
 
           <div className="bg-white p-6 rounded-3xl border border-slate-100 shadow-sm">
-            <h3 className="font-bold text-slate-900 mb-4 px-2">Comunicados</h3>
-            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
-              <div className="flex items-center gap-2 mb-2">
-                <div className="w-1.5 h-1.5 rounded-full bg-blue-600" />
-                <span className="text-[10px] font-black uppercase text-blue-600 tracking-wider">Aviso de RH</span>
+            <div className="flex items-center justify-between mb-4 px-2">
+              <h3 className="font-bold text-slate-900">Comunicados & Mensagens</h3>
+              <button 
+                onClick={() => onNavigate('notifications')}
+                className="text-xs font-bold text-blue-600 hover:text-blue-700 flex items-center gap-1 cursor-pointer"
+              >
+                <span>Ver todas</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div 
+              onClick={() => onNavigate('notifications')}
+              className="p-4 bg-slate-50 hover:bg-blue-50/50 transition-all rounded-2xl border border-slate-100 cursor-pointer group"
+            >
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+                  <span className="text-[10px] font-black uppercase text-blue-600 tracking-wider">Central de Mensagens</span>
+                </div>
+                <span className="text-[10px] font-bold text-slate-400 group-hover:text-blue-600 transition-colors">Abrir</span>
               </div>
-              <p className="text-sm font-bold text-slate-900 mb-1">Avisos Importantes</p>
+              <p className="text-sm font-bold text-slate-900 mb-1">Avisos do RH e Holerites</p>
               <p className="text-xs text-slate-500 leading-relaxed">
-                As comunicações da empresa para os colaboradores aparecerão aqui.
+                Toque para visualizar suas notificações, recibos assinados e excluir mensagens antigas.
               </p>
             </div>
           </div>

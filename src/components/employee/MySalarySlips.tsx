@@ -58,7 +58,8 @@ import {
   calculatePayrollTotals, 
   calculateInss, 
   calculateIrrf, 
-  PayrollTotals 
+  PayrollTotals,
+  deduplicateSlipItems
 } from '../../lib/payrollRubrics';
 import { motion, AnimatePresence } from 'motion/react';
 import { createNotification } from '../../lib/notifications';
@@ -137,6 +138,7 @@ export default function MySalarySlips() {
   const [selectedAdminEmployee, setSelectedAdminEmployee] = useState<any>(null);
   const [adminSidebarTab, setAdminSidebarTab] = useState<'employees' | 'admins'>('employees');
   const [company, setCompany] = useState<any>(null);
+  const [servicePosts, setServicePosts] = useState<any[]>([]);
 
   // Digital Signature modal states
   const [showSignModal, setShowSignModal] = useState(false);
@@ -203,6 +205,7 @@ export default function MySalarySlips() {
   const [slipCreationMode, setSlipCreationMode] = useState<'upload' | 'manual'>('manual');
   const [newSlipForm, setNewSlipForm] = useState({
     userId: '',
+    postoName: '',
     month: new Date().getMonth() + 1,
     year: new Date().getFullYear(),
     baseSalary: 2500,
@@ -356,12 +359,28 @@ export default function MySalarySlips() {
     };
 
     setNewSlipItems(prev => {
+      const codeClean = newItem.code.trim();
+      const descClean = newItem.description.trim().toUpperCase();
+
       // If adding base salary, replace existing base salary item
-      if (newItem.code === '8781' || newItem.description.toUpperCase().includes('DIAS NORMAIS') || newItem.description.toUpperCase().includes('SALÁRIO BASE')) {
+      if (codeClean === '8781' || descClean.includes('DIAS NORMAIS') || descClean.includes('SALÁRIO BASE')) {
         setNewSlipForm(f => ({ ...f, baseSalary: newItem.amount }));
-        const filtered = prev.filter(it => it.code !== '8781' && !it.description.toUpperCase().includes('DIAS NORMAIS') && !it.description.toUpperCase().includes('SALÁRIO BASE'));
+        const filtered = prev.filter(it => it.code.trim() !== '8781' && !it.description.toUpperCase().includes('DIAS NORMAIS') && !it.description.toUpperCase().includes('SALÁRIO BASE'));
         return [newItem, ...filtered];
       }
+
+      // If item with the same code or description already exists, update it instead of duplicating
+      const existingIdx = prev.findIndex(it => (codeClean && it.code.trim() === codeClean) || (it.description.trim().toUpperCase() === descClean && it.type === newItem.type));
+      if (existingIdx >= 0) {
+        const copy = [...prev];
+        copy[existingIdx] = {
+          ...copy[existingIdx],
+          ...newItem,
+          id: copy[existingIdx].id
+        };
+        return copy;
+      }
+
       return [...prev, newItem];
     });
 
@@ -568,6 +587,53 @@ export default function MySalarySlips() {
 
     return unsubEmployees;
   }, [isAdmin]);
+
+  // Fetch service posts in real time
+  useEffect(() => {
+    const qPosts = query(collection(db, 'servicePosts'));
+    const unsubPosts = onSnapshot(qPosts, (snapshot) => {
+      const pList = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setServicePosts(pList);
+    }, (error) => {
+      console.warn('Erro ao buscar postos de serviço:', error);
+    });
+
+    return () => unsubPosts();
+  }, []);
+
+  // Helper para identificar automaticamente o posto de serviço do colaborador
+  const findEmployeeServicePost = (emp: any): string => {
+    if (!emp) return 'MAESTRO LOCADORA DE';
+    // 1. Posto cadastrado diretamente no perfil do colaborador
+    if (emp.postoName && emp.postoName.trim()) {
+      return emp.postoName.trim();
+    }
+    // 2. Busca nos postos de serviço cadastrados onde o colaborador está alocado
+    const empName = (emp.name || '').trim().toLowerCase();
+    const empId = emp.id || emp.uid;
+    const found = servicePosts.find((p: any) => {
+      const cols = Array.isArray(p.colaboradores) ? p.colaboradores : [];
+      const vigs = Array.isArray(p.vigilantes) ? p.vigilantes : [];
+      return cols.some((c: string) => (typeof c === 'string' && c.toLowerCase().includes(empName)) || c === empId) ||
+             vigs.some((v: string) => (typeof v === 'string' && v.toLowerCase().includes(empName)) || v === empId);
+    });
+    if (found && found.name) {
+      return found.name.trim();
+    }
+    return 'MAESTRO LOCADORA DE';
+  };
+
+  // Sincroniza posto do colaborador automaticamente na criação do holerite
+  useEffect(() => {
+    if (selectedAdminEmployee) {
+      const autoPost = findEmployeeServicePost(selectedAdminEmployee);
+      setNewSlipForm(prev => ({
+        ...prev,
+        userId: selectedAdminEmployee.id,
+        postoName: autoPost
+      }));
+    }
+  }, [selectedAdminEmployee, servicePosts]);
 
   // Fetch data depending on role in real time
   useEffect(() => {
@@ -1112,24 +1178,35 @@ export default function MySalarySlips() {
       const parsedItems: SalarySlipLineItem[] = [];
       const baseSalaryDetected = Number(data.baseSalary) || newSlipForm.baseSalary || 2500;
       
-      parsedItems.push({
-        id: `item-ai-base-${Date.now()}`,
-        code: '8781',
-        description: 'DIAS NORMAIS',
-        reference: '31,00',
-        type: 'addition',
-        amount: baseSalaryDetected
+      const hasBaseInAdditions = (data.additions || []).some((a: any) => {
+        const c = String(a.code || '').trim();
+        const desc = (a.name || a.description || '').toUpperCase();
+        return c === '8781' || desc.includes('DIAS NORMAIS') || desc.includes('SALÁRIO BASE') || desc.includes('SALARIO BASE');
       });
+
+      if (!hasBaseInAdditions) {
+        parsedItems.push({
+          id: `item-ai-base-${Date.now()}`,
+          code: '8781',
+          description: 'DIAS NORMAIS',
+          reference: '31,00',
+          type: 'addition',
+          amount: baseSalaryDetected
+        });
+      }
 
       (data.additions || []).forEach((a: any, idx: number) => {
         const matched = matchRubricDetails(a.name || a.description, 'addition', allRubrics);
+        const code = a.code || matched.code;
+        const desc = (a.name || a.description || matched.description).toUpperCase();
+        const isBase = code === '8781' || desc.includes('DIAS NORMAIS') || desc.includes('SALÁRIO BASE') || desc.includes('SALARIO BASE');
         parsedItems.push({
           id: `item-ai-add-${idx}-${Date.now()}`,
-          code: a.code || matched.code,
-          description: (a.name || a.description || matched.description).toUpperCase(),
-          reference: a.reference || matched.reference,
+          code: isBase ? '8781' : code,
+          description: isBase ? 'DIAS NORMAIS' : desc,
+          reference: isBase ? (a.reference || '31,00') : (a.reference || matched.reference),
           type: 'addition',
-          amount: Number(a.amount) || 0
+          amount: Number(a.amount) || (isBase ? baseSalaryDetected : 0)
         });
       });
 
@@ -1145,7 +1222,8 @@ export default function MySalarySlips() {
         });
       });
 
-      setNewSlipItems(parsedItems);
+      const cleanParsed = deduplicateSlipItems(parsedItems);
+      setNewSlipItems(cleanParsed);
       setSlipCreationMode('upload');
 
       setNewSlipForm(prev => ({
@@ -1207,6 +1285,13 @@ export default function MySalarySlips() {
 
     try {
       const isVacation = newSlipForm.documentType === 'vacation';
+      const assignedPosto = (
+        newSlipForm.postoName || 
+        findEmployeeServicePost(selectedAdminEmployee) || 
+        selectedAdminEmployee.postoName || 
+        'MAESTRO LOCADORA DE'
+      ).trim();
+
       let slipData: any = {};
 
       if (isVacation) {
@@ -1218,7 +1303,7 @@ export default function MySalarySlips() {
         const inss = Number(calculateInss(totalAdditions).inss.toFixed(2));
         const irpf = Number(calculateIrrf(Math.max(0, totalAdditions - inss)).irrf.toFixed(2));
 
-        const vacationItems: SalarySlipLineItem[] = [
+        const rawVacationItems: SalarySlipLineItem[] = [
           { id: 'vac-1', code: '0220', description: 'VALOR DAS FÉRIAS (GOZO)', reference: '30 Dias', type: 'addition', amount: vacationSalary },
           ...(newSlipForm.hasConstitutionalThird ? [{ id: 'vac-2', code: '0221', description: 'TERÇO CONSTITUCIONAL DE FÉRIAS (1/3)', reference: '33,33%', type: 'addition' as const, amount: constThird }] : []),
           ...extraAdditions,
@@ -1227,6 +1312,7 @@ export default function MySalarySlips() {
           ...newSlipItems.filter(it => it.type === 'deduction' && it.code !== '0910' && it.code !== '0514')
         ];
 
+        const vacationItems = deduplicateSlipItems(rawVacationItems);
         const totalDeductions = vacationItems.filter(it => it.type === 'deduction').reduce((acc, cur) => acc + cur.amount, 0);
         const netSalary = Math.max(0, totalAdditions - totalDeductions);
 
@@ -1260,6 +1346,8 @@ export default function MySalarySlips() {
           signed: false,
           issuedAt: new Date().toISOString(),
           documentType: 'vacation',
+          postoName: assignedPosto,
+          centroCusto: assignedPosto,
           vacationStart: newSlipForm.vacationStart || '',
           vacationEnd: newSlipForm.vacationEnd || '',
           acquisitionStart: newSlipForm.acquisitionStart || '',
@@ -1268,7 +1356,8 @@ export default function MySalarySlips() {
           hasConstitutionalThird: newSlipForm.hasConstitutionalThird
         };
       } else {
-        const totals = calculatePayrollTotals(newSlipItems, newSlipForm.baseSalary);
+        const cleanItems = deduplicateSlipItems(newSlipItems);
+        const totals = calculatePayrollTotals(cleanItems, newSlipForm.baseSalary);
 
         slipData = {
           userId: selectedAdminEmployee.id,
@@ -1283,15 +1372,15 @@ export default function MySalarySlips() {
           fgtsMes: totals.fgtsMes,
           baseIrrf: totals.baseIrrf,
           faixaIrrf: totals.faixaIrrf,
-          items: newSlipItems,
-          taxes: newSlipItems.map(it => ({
+          items: cleanItems,
+          taxes: cleanItems.map(it => ({
             name: it.description,
             amount: it.amount,
             type: it.type,
             code: it.code,
             reference: it.reference
           })),
-          discounts: newSlipItems.filter(it => it.type === 'deduction' && it.code !== '9382' && it.code !== '9392').map(it => ({
+          discounts: cleanItems.filter(it => it.type === 'deduction' && it.code !== '9382' && it.code !== '9392').map(it => ({
             name: it.description,
             amount: it.amount,
             code: it.code,
@@ -1304,7 +1393,9 @@ export default function MySalarySlips() {
           companyCopySaved: true,
           employeeCopySaved: true,
           hasEmployeeCopy: true,
-          documentType: 'salary'
+          documentType: 'salary',
+          postoName: assignedPosto,
+          centroCusto: assignedPosto
         };
       }
 
@@ -1373,10 +1464,12 @@ export default function MySalarySlips() {
     return matchesFolder && matchesDocType && matchesSearch;
   });
 
-  const targetEmployeeName = isAdmin ? (selectedAdminEmployee?.name || 'FUNCIONÁRIO') : (user?.name || 'CONTRATADO');
-  const targetEmployeeCpf = isAdmin ? (selectedAdminEmployee?.cpf || '') : (user?.cpf || '');
-  const targetEmployeeId = isAdmin ? (selectedAdminEmployee?.employeeId || '') : (user?.employeeId || '');
-  const targetEmployeeJob = isAdmin ? (selectedAdminEmployee?.department || '') : (user?.department || '');
+  const slipUser = employees.find(e => e.id === selectedSlip?.userId) || (isAdmin ? selectedAdminEmployee : user);
+  const targetEmployeeName = slipUser?.name || (isAdmin ? (selectedAdminEmployee?.name || 'FUNCIONÁRIO') : (user?.name || 'CONTRATADO'));
+  const targetEmployeeCpf = slipUser?.cpf || (isAdmin ? (selectedAdminEmployee?.cpf || '') : (user?.cpf || ''));
+  const targetEmployeeId = slipUser?.employeeId || (isAdmin ? (selectedAdminEmployee?.employeeId || '') : (user?.employeeId || ''));
+  const targetEmployeeJob = slipUser?.department || (isAdmin ? (selectedAdminEmployee?.department || '') : (user?.department || ''));
+  const targetEmployeePosto = selectedSlip?.postoName || selectedSlip?.centroCusto || slipUser?.postoName || findEmployeeServicePost(slipUser) || 'MAESTRO LOCADORA DE';
 
   return (
     <div className="space-y-8 pb-10">
@@ -1403,6 +1496,7 @@ export default function MySalarySlips() {
               setSlipPlantoes(autoShifts);
               setNewSlipForm({
                 userId: selectedAdminEmployee?.id || '',
+                postoName: findEmployeeServicePost(selectedAdminEmployee) || selectedAdminEmployee?.postoName || 'MAESTRO LOCADORA DE',
                 month: curMonth,
                 year: curYear,
                 baseSalary: selectedAdminEmployee?.salary || 2500,
@@ -1501,7 +1595,7 @@ export default function MySalarySlips() {
                     >
                       <div className="flex flex-col gap-0.5 truncate pr-2">
                         <span className="truncate group-hover:text-slate-900 group-hover:font-extrabold transition-all">{emp.name}</span>
-                        <span className="text-[10px] opacity-75">{emp.department || 'Serviços'} • R$ {emp.salary || '2.500'}</span>
+                        <span className="text-[10px] opacity-75 truncate">{emp.department || 'Serviços'} • Posto: {findEmployeeServicePost(emp)} • R$ {emp.salary || '2.500'}</span>
                       </div>
                       <ChevronRight className={cn("w-4 h-4 shrink-0 transition-all opacity-0 group-hover:opacity-100", selectedAdminEmployee?.id === emp.id && "opacity-100 text-blue-600")} />
                     </button>
@@ -1976,8 +2070,8 @@ export default function MySalarySlips() {
                                   </div>
                                 </div>
                                 <div className="col-span-3 p-2 border-r border-black flex flex-col justify-between text-center h-14">
-                                  <div className="font-bold text-[7.5px] text-zinc-900 leading-tight">
-                                    CC: {(targetEmployeeJob || '').split(' ')[0] || 'RSN'} LOGISTICA
+                                  <div className="font-bold text-[7.5px] text-zinc-900 leading-tight truncate px-0.5" title={(targetEmployeePosto || 'MAESTRO LOCADORA DE').toUpperCase()}>
+                                    CC: {(targetEmployeePosto || 'MAESTRO LOCADORA DE').toUpperCase()}
                                   </div>
                                   <div className="text-[7.5px] text-zinc-700 font-bold">
                                     Mensalista
@@ -2010,7 +2104,7 @@ export default function MySalarySlips() {
                                   <div className="text-[7px] text-zinc-650 font-bold uppercase mt-0.5 tracking-tight">{targetEmployeeJob || 'VIGIA'}</div>
                                 </div>
                                 <div className="col-span-2 p-1 border-r border-black">
-                                  <span className="block text-[6px] font-bold text-zinc-500 uppercase tracking-tight mb-1">CBO</span>
+                                  <span className="block text-[6px] font-bold text-zinc-500 uppercase tracking-tight mb-1">C.B.O.</span>
                                   <span className="font-bold text-[8.5px] block text-center">{getCboByJob(targetEmployeeJob)}</span>
                                 </div>
                                 <div className="col-span-1 p-1 border-r border-black">
@@ -2057,7 +2151,7 @@ export default function MySalarySlips() {
 
                                 <div className="relative z-10">
                                   {hasStructuredItems ? (
-                                    selectedSlip.items.map((item: SalarySlipLineItem, idx: number) => {
+                                    deduplicateSlipItems(selectedSlip.items).map((item: SalarySlipLineItem, idx: number) => {
                                       const isAdd = item.type === 'addition';
                                       const isInfo = item.type === 'info' || item.code === '9382' || item.code === '9392';
                                       return (
@@ -2761,6 +2855,43 @@ export default function MySalarySlips() {
                     </div>
                   </div>
 
+                  {/* Posto de Serviço / Centro de Custo (CC do Holerite) */}
+                  <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[10px] font-black uppercase text-slate-600 flex items-center gap-1.5">
+                        <Building className="w-3.5 h-3.5 text-blue-600" />
+                        Posto de Serviço (CC - Centro de Custo)
+                      </label>
+                      <span className="text-[9px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/50">
+                        {newSlipForm.postoName ? 'Posto Definido' : 'Auto-Detectado'}
+                      </span>
+                    </div>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        list="service-posts-datalist"
+                        value={newSlipForm.postoName || ''}
+                        onChange={(e) => setNewSlipForm({ ...newSlipForm, postoName: e.target.value })}
+                        placeholder="Ex: MAESTRO LOCADORA DE, RSN LOGISTICA..."
+                        className="w-full text-xs font-black uppercase bg-white rounded-xl px-3.5 py-2.5 text-slate-800 border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder:normal-case placeholder:font-normal"
+                      />
+                      <datalist id="service-posts-datalist">
+                        {servicePosts.map(p => (
+                          <option key={p.id} value={p.name} />
+                        ))}
+                        <option value="MAESTRO LOCADORA DE" />
+                        <option value="RSN LOGISTICA" />
+                        <option value="PORTARIA PRINCIPAL" />
+                      </datalist>
+                    </div>
+                    <div className="flex items-center justify-between text-[9px] text-slate-500 font-medium">
+                      <span>Nome do posto onde o serviço é prestado.</span>
+                      <span className="font-extrabold text-blue-600 uppercase">
+                        CC: {(newSlipForm.postoName || findEmployeeServicePost(selectedAdminEmployee) || 'MAESTRO LOCADORA DE').toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+
                   {/* Document Type Selector */}
                   <div className="bg-slate-50 border border-slate-100 rounded-2xl p-2.5 flex gap-2">
                     <button
@@ -3300,8 +3431,8 @@ export default function MySalarySlips() {
                               </div>
                             </div>
                             <div className="col-span-3 p-2 border-r border-black flex flex-col justify-between text-center h-14">
-                              <div className="font-bold text-[7.5px] text-zinc-900 leading-tight">
-                                CC: {(selectedAdminEmployee.department || '').split(' ')[0] || 'RSN'} LOGISTICA
+                              <div className="font-bold text-[7.5px] text-zinc-900 leading-tight truncate px-0.5" title={(newSlipForm.postoName || findEmployeeServicePost(selectedAdminEmployee) || selectedAdminEmployee.postoName || 'MAESTRO LOCADORA DE').toUpperCase()}>
+                                CC: {(newSlipForm.postoName || findEmployeeServicePost(selectedAdminEmployee) || selectedAdminEmployee.postoName || 'MAESTRO LOCADORA DE').toUpperCase()}
                               </div>
                               <div className="text-[7.5px] text-zinc-700 font-bold">
                                 Mensalista
@@ -3334,7 +3465,7 @@ export default function MySalarySlips() {
                               <div className="text-[7px] text-zinc-650 font-bold uppercase mt-0.5 tracking-tight">{selectedAdminEmployee.department || 'VIGIA'}</div>
                             </div>
                             <div className="col-span-2 p-1 border-r border-black">
-                              <span className="block text-[6px] font-bold text-zinc-500 uppercase tracking-tight mb-1">CBO</span>
+                              <span className="block text-[6px] font-bold text-zinc-500 uppercase tracking-tight mb-1">C.B.O.</span>
                               <span className="font-bold text-[8.5px] block text-center">{getCboByJob(selectedAdminEmployee.department)}</span>
                             </div>
                             <div className="col-span-1 p-1 border-r border-black">
@@ -3379,7 +3510,7 @@ export default function MySalarySlips() {
                             </div>
 
                             <div className="relative z-10">
-                              {newSlipItems.map((item, idx) => {
+                              {deduplicateSlipItems(newSlipItems).map((item, idx) => {
                                 const isAdd = item.type === 'addition';
                                 const isInfo = item.type === 'info' || item.code === '9382' || item.code === '9392';
                                 return (

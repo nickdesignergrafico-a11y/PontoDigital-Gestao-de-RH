@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import { initializeApp } from "firebase/app";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword } from "firebase/auth";
-import { getFirestore, doc, setDoc, deleteDoc, collection, getDocs } from "firebase/firestore";
+import { getFirestore, doc, setDoc, deleteDoc, collection, getDocs, getDoc, query, where } from "firebase/firestore";
 import fs from 'fs';
 import admin from 'firebase-admin';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -229,6 +229,178 @@ async function startServer() {
     } catch (err: any) {
       console.error("Error changing user password:", err);
       res.status(500).json({ success: false, error: err.message || "Erro ao alterar senha de acesso." });
+    }
+  });
+
+  // Disparo de Notificações Push via Firebase Cloud Messaging (FCM)
+  app.post("/api/push/send", async (req, res) => {
+    try {
+      if (!firebaseConfig) {
+        return res.status(500).json({ success: false, error: "Firebase não está inicializado no backend." });
+      }
+      const { targetUserIds, title, message, link, type, unreadCount } = req.body;
+      if (!title || !message) {
+        return res.status(400).json({ success: false, error: "Título e mensagem são obrigatórios." });
+      }
+
+      const fbAdmin = getFirebaseAdmin(firebaseConfig.projectId);
+      const tokens: string[] = [];
+
+      if (Array.isArray(targetUserIds) && targetUserIds.length > 0) {
+        for (const uid of targetUserIds) {
+          try {
+            const userSnap = await getDoc(doc(db, 'users', uid));
+            if (userSnap.exists()) {
+              const uData = userSnap.data();
+              if (Array.isArray(uData?.fcmTokens)) {
+                tokens.push(...uData.fcmTokens);
+              } else if (uData?.fcmToken) {
+                tokens.push(uData.fcmToken);
+              }
+            }
+          } catch (fetchErr) {
+            console.warn(`Erro ao buscar token para usuário ${uid}:`, fetchErr);
+          }
+        }
+      } else {
+        // Enviar para todos os usuários ativos
+        try {
+          const qAll = query(collection(db, 'users'), where('active', '==', true));
+          const allSnap = await getDocs(qAll);
+          allSnap.forEach(d => {
+            const uData = d.data();
+            if (Array.isArray(uData?.fcmTokens)) {
+              tokens.push(...uData.fcmTokens);
+            } else if (uData?.fcmToken) {
+              tokens.push(uData.fcmToken);
+            }
+          });
+        } catch (allErr) {
+          console.warn("Erro ao buscar usuários para envio de push:", allErr);
+        }
+      }
+
+      // Filtrar tokens válidos únicos
+      const validTokens = Array.from(new Set(tokens.filter(t => typeof t === 'string' && t.trim().length > 15)));
+
+      if (validTokens.length === 0) {
+        return res.json({ success: true, sentCount: 0, message: "Nenhum token FCM registrado para os destinatários." });
+      }
+
+      const badgeNum = typeof unreadCount === 'number' && unreadCount > 0 ? String(unreadCount) : '1';
+
+      const multicastPayload: admin.messaging.MulticastMessage = {
+        notification: {
+          title: title,
+          body: message,
+        },
+        data: {
+          title: String(title),
+          message: String(message),
+          link: String(link || '/#notifications'),
+          type: String(type || 'info'),
+          unreadCount: badgeNum,
+        },
+        webpush: {
+          notification: {
+            title: title,
+            body: message,
+            icon: '/pwa-icon.png',
+            badge: '/pwa-icon.png',
+            vibrate: [150, 80, 150],
+          },
+          fcmOptions: {
+            link: link || '/#notifications',
+          }
+        },
+        tokens: validTokens,
+      };
+
+      const result = await fbAdmin.messaging().sendEachForMulticast(multicastPayload);
+      console.log(`[Push FCM] Enviado com sucesso: ${result.successCount} de ${validTokens.length} dispositivos.`);
+
+      res.json({
+        success: true,
+        sentCount: result.successCount,
+        failureCount: result.failureCount,
+        totalTokens: validTokens.length
+      });
+    } catch (pushErr: any) {
+      console.error("Erro no endpoint /api/push/send:", pushErr);
+      res.status(500).json({ success: false, error: pushErr.message || "Erro ao disparar push via Firebase" });
+    }
+  });
+
+  // Teste de Push Notification direto para o usuário logado
+  app.post("/api/push/test", async (req, res) => {
+    try {
+      if (!firebaseConfig) {
+        return res.status(500).json({ success: false, error: "Firebase não está inicializado no backend." });
+      }
+      const { uid, token } = req.body;
+      if (!uid && !token) {
+        return res.status(400).json({ success: false, error: "UID ou Token é obrigatório." });
+      }
+
+      const fbAdmin = getFirebaseAdmin(firebaseConfig.projectId);
+      const targetTokens: string[] = [];
+
+      if (token) {
+        targetTokens.push(token);
+      } else if (uid) {
+        const userSnap = await getDoc(doc(db, 'users', uid));
+        if (userSnap.exists()) {
+          const uData = userSnap.data();
+          if (Array.isArray(uData?.fcmTokens)) {
+            targetTokens.push(...uData.fcmTokens);
+          } else if (uData?.fcmToken) {
+            targetTokens.push(uData.fcmToken);
+          }
+        }
+      }
+
+      const validTokens = Array.from(new Set(targetTokens.filter(t => typeof t === 'string' && t.trim().length > 15)));
+      if (validTokens.length === 0) {
+        return res.status(404).json({ success: false, error: "Nenhum token FCM encontrado no cadastro deste usuário. Permita notificações no aparelho primeiro." });
+      }
+
+      const multicastPayload: admin.messaging.MulticastMessage = {
+        notification: {
+          title: "🔔 Teste de Notificação PontoDigital",
+          body: "As notificações push via Firebase estão configuradas e ativas no seu aparelho!",
+        },
+        data: {
+          title: "🔔 Teste de Notificação PontoDigital",
+          message: "As notificações push via Firebase estão configuradas e ativas no seu aparelho!",
+          link: "/#notifications",
+          type: "success",
+          unreadCount: "1",
+        },
+        webpush: {
+          notification: {
+            title: "🔔 Teste de Notificação PontoDigital",
+            body: "As notificações push via Firebase estão configuradas e ativas no seu aparelho!",
+            icon: '/pwa-icon.png',
+            badge: '/pwa-icon.png',
+            vibrate: [200, 100, 200],
+          },
+          fcmOptions: {
+            link: '/#notifications',
+          }
+        },
+        tokens: validTokens,
+      };
+
+      const result = await fbAdmin.messaging().sendEachForMulticast(multicastPayload);
+      res.json({
+        success: true,
+        sentCount: result.successCount,
+        failureCount: result.failureCount,
+        message: `Notificação de teste enviada para ${result.successCount} dispositivo(s)!`
+      });
+    } catch (testErr: any) {
+      console.error("Erro no envio do teste de push:", testErr);
+      res.status(500).json({ success: false, error: testErr.message || "Erro ao enviar push de teste" });
     }
   });
 
