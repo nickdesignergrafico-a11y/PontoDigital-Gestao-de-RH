@@ -530,10 +530,10 @@ export default function UserManagement({
       return u.active === false && u.role !== 'admin';
     }
     if (activeTab === 'sincronizados') {
-      return u.role !== 'admin';
+      return u.role !== 'admin' && u.active !== false;
     }
     if (activeTab === 'trabalhando') {
-      return presentUserIds.has(u.uid) && u.role !== 'admin';
+      return presentUserIds.has(u.uid) && u.role !== 'admin' && u.active !== false;
     }
     if (activeTab === 'banco') {
       return u.active !== false && u.role !== 'admin';
@@ -584,8 +584,8 @@ export default function UserManagement({
         {[
           { id: 'ativos', label: 'Ativos', count: users.filter(u => u.active !== false && u.role !== 'admin').length, activeColor: 'bg-emerald-500 text-white shadow-md shadow-emerald-500/20', inactiveColor: 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200' },
           { id: 'desligados', label: 'Desligados', count: users.filter(u => u.active === false && u.role !== 'admin').length, activeColor: 'bg-rose-500 text-white shadow-md shadow-rose-500/20', inactiveColor: 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200' },
-          { id: 'sincronizados', label: 'Colaboradores CLT', count: users.filter(u => u.role !== 'admin').length, activeColor: 'bg-blue-600 text-white shadow-md shadow-blue-600/20', inactiveColor: 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200' },
-          { id: 'trabalhando', label: 'Trabalhando Hoje', count: users.filter(u => presentUserIds.has(u.uid) && u.role !== 'admin').length, activeColor: 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20', inactiveColor: 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200' },
+          { id: 'sincronizados', label: 'Colaboradores CLT', count: users.filter(u => u.role !== 'admin' && u.active !== false).length, activeColor: 'bg-blue-600 text-white shadow-md shadow-blue-600/20', inactiveColor: 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200' },
+          { id: 'trabalhando', label: 'Trabalhando Hoje', count: users.filter(u => presentUserIds.has(u.uid) && u.role !== 'admin' && u.active !== false).length, activeColor: 'bg-indigo-600 text-white shadow-md shadow-indigo-600/20', inactiveColor: 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200' },
           { id: 'banco', label: 'Banco de Horas', count: users.filter(u => u.active !== false && u.role !== 'admin').length, activeColor: 'bg-purple-600 text-white shadow-md shadow-purple-600/20', inactiveColor: 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200' },
           { id: 'admins', label: 'Administradores', count: users.filter(u => u.role === 'admin').length, activeColor: 'bg-violet-600 text-white shadow-md shadow-violet-600/20', inactiveColor: 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200' }
         ].map((tab) => (

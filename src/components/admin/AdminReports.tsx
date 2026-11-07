@@ -407,7 +407,9 @@ export default function AdminReports({ onViewEmployeeTimecard, onViewUsersTab, o
     setGenerating(true);
     try {
       const uSnapshot = await getDocs(collection(db, 'users'));
-      const users = uSnapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+      const users = uSnapshot.docs
+        .map(d => ({ id: d.id, ...d.data() }))
+        .filter((u: any) => u.active !== false && u.role !== 'admin');
       
       for (const user of users) {
         const base = (user as any).salary || 2500;

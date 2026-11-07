@@ -54,7 +54,9 @@ export default function TimecardReceipts({ onViewTimecard }: TimecardReceiptsPro
     // 1. Fetch all employees in real time
     const usersQuery = query(collection(db, 'users'), where('role', '==', 'employee'));
     const unsubUsers = onSnapshot(usersQuery, (snapshot) => {
-      const employees = snapshot.docs.map(d => ({ uid: d.id, ...d.data() } as User));
+      const employees = snapshot.docs
+        .map(d => ({ uid: d.id, ...d.data() } as User))
+        .filter(u => u.active !== false);
       setUsers(employees);
     }, (error) => {
       console.error('Error fetching users in real-time:', error);

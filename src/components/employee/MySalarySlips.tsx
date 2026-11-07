@@ -47,7 +47,8 @@ import {
   Settings2,
   Edit3,
   ListPlus,
-  Check
+  Check,
+  Clock
 } from 'lucide-react';
 import { cn, formatCurrency, calcularPontoEValeAutomatico, contarPlantoesTrabalhadosNoMes } from '../../lib/utils';
 import { 
@@ -172,17 +173,6 @@ export default function MySalarySlips() {
     }
   }, []);
 
-  const [lastAutoOpenedSlipId, setLastAutoOpenedSlipId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (isAdmin && selectedSlip && selectedSlip.signed && !selectedSlip.adminSigned) {
-      if (lastAutoOpenedSlipId !== selectedSlip.id) {
-        setLastAutoOpenedSlipId(selectedSlip.id);
-        setTypedName(user ? (user.name || '') : '');
-        setShowSignModal(true);
-      }
-    }
-  }, [isAdmin, selectedSlip, lastAutoOpenedSlipId, user]);
 
   const targetWidth = 794; // Standard A4 width in px for preview
   const isMobileSize = containerWidth < targetWidth;
@@ -571,15 +561,17 @@ export default function MySalarySlips() {
     if (!isAdmin) return;
     const q = query(collection(db, 'users'));
     const unsubEmployees = onSnapshot(q, (snapshot) => {
-      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const list = snapshot.docs
+        .map(doc => ({ id: doc.id, ...(doc.data() as any) }))
+        .filter((u: any) => u.active !== false);
       setEmployees(list);
-      // If none selected yet, select the first
+      // If none selected yet, select the first active collaborator
       setSelectedAdminEmployee(current => {
         if (current) {
-          const stillExists = list.find(u => u.id === current.id);
+          const stillExists = list.find((u: any) => u.id === current.id);
           if (stillExists) return stillExists;
         }
-        return list.length > 0 ? list[0] : null;
+        return list.find((u: any) => u.role !== 'admin') || (list.length > 0 ? list[0] : null);
       });
     }, (error) => {
       console.error('Error fetching employees in real-time:', error);
@@ -885,31 +877,25 @@ export default function MySalarySlips() {
       const uploadPath = `signatures/slips/${user?.uid || 'anonymous'}_${slipId}_${Date.now()}.png`;
       const downloadURL = await uploadBase64ToStorage(dataUrl, uploadPath);
 
-      const isAdminSign = user?.role === 'admin';
       const dummyIp = '177.' + Math.floor(Math.random() * 200 + 40) + '.' + Math.floor(Math.random() * 250) + '.' + Math.floor(Math.random() * 250);
 
-      const payload = isAdminSign ? {
-        adminSigned: true,
-        adminSignatureDataUrl: downloadURL,
-        adminSignatureText: signMode === 'type' ? typedName.trim() : '',
-        adminSignatureType: signMode,
-        adminSignedAt: new Date().toISOString(),
-        adminSignerIp: dummyIp,
-        adminSignerUserAgent: navigator.userAgent || 'App-Movel-Webview',
-        companyCopySaved: true,
-      } : {
+      const signedAtIso = new Date().toISOString();
+      const payload = {
         signed: true,
         signatureDataUrl: downloadURL,
         signatureText: signMode === 'type' ? typedName.trim() : '',
         signatureType: signMode,
-        signedAt: new Date().toISOString(),
+        signedAt: signedAtIso,
         signerIp: dummyIp,
         signerUserAgent: navigator.userAgent || 'App-Movel-Webview',
         sentToCompany: true,
-        sentToCompanyAt: new Date().toISOString(),
+        sentToCompanyAt: signedAtIso,
+        returnedToCompany: true,
+        returnedToCompanyAt: signedAtIso,
         employeeCopySaved: true,
-        employeeCopySavedAt: new Date().toISOString(),
+        employeeCopySavedAt: signedAtIso,
         hasEmployeeCopy: true,
+        companyCopySaved: true
       };
 
       await updateDoc(doc(db, 'salarySlips', slipId), payload);
@@ -919,31 +905,19 @@ export default function MySalarySlips() {
       setSlips(slips.map(s => s.id === slipId ? updatedSlip : s));
       setSelectedSlip(updatedSlip);
 
-      // Add push notification depending on who is signing
-      if (isAdminSign) {
+      // Notification for employee confirming copy is now saved in app
+      if (user?.uid) {
         await createNotification(
-          selectedSlip.userId, // goes to the employee
-          'Holerite Homologado',
-          `Seu Holerite do mês de ${months[selectedSlip.month - 1]}/${selectedSlip.year} foi vistado e homologado pelo RH/Administração com sucesso.`,
-          'success',
-          'payroll'
-        );
-      } else {
-        await createNotification(
-          user!.uid,
+          user.uid,
           'Holerite Assinado e Salvo no App',
-          `Seu Holerite do mês de ${months[selectedSlip.month - 1]}/${selectedSlip.year} foi assinado e enviado para a empresa com sucesso! Uma cópia oficial com sua assinatura já está salva no seu aplicativo.`,
+          `Seu Holerite de ${months[selectedSlip.month - 1]}/${selectedSlip.year} foi assinado e devolvido para a empresa com sucesso! Uma cópia oficial com sua assinatura já está salva e arquivada no seu aplicativo.`,
           'success',
           'payroll'
         );
       }
 
       setShowSignModal(false);
-      if (isAdminSign) {
-        alert('Holerite homologado com sucesso!');
-      } else {
-        alert('Holerite assinado digitalmente e enviado para a empresa com sucesso! Uma cópia oficial foi salva e arquivada diretamente no seu aplicativo.');
-      }
+      alert('Holerite assinado digitalmente e devolvido com sucesso! A sua via oficial assinada já está salva e arquivada no seu aplicativo.');
     } catch (err) {
       alert('Erro ao assinar holerite: ' + err);
     } finally {
@@ -1391,8 +1365,8 @@ export default function MySalarySlips() {
           sentToCompanyAt: new Date().toISOString(),
           sentToEmployeeAt: new Date().toISOString(),
           companyCopySaved: true,
-          employeeCopySaved: true,
-          hasEmployeeCopy: true,
+          employeeCopySaved: false,
+          hasEmployeeCopy: false,
           documentType: 'salary',
           postoName: assignedPosto,
           centroCusto: assignedPosto
@@ -1401,11 +1375,11 @@ export default function MySalarySlips() {
 
       await addDoc(collection(db, 'salarySlips'), slipData);
 
-      // Create notification for employee
+      // Create notification for employee requesting signature
       const notificationTitle = isVacation ? 'Férias Enviadas pela Administração' : 'Novo Holerite Enviado';
       const notificationMsg = isVacation
-        ? `A Administração enviou de forma digital seu Recibo e Aviso de Férias (${newSlipForm.vacationStart} a ${newSlipForm.vacationEnd}). Por favor, acesse para assinar.`
-        : `A Administração enviou o seu holerite do mês de ${months[slipData.month - 1]}/${slipData.year}. Uma cópia oficial já está salva no seu app para conferir e assinar.`;
+        ? `A Administração enviou seu Recibo de Férias (${newSlipForm.vacationStart} a ${newSlipForm.vacationEnd}). Acesse seu aplicativo para assinar e devolver. A via oficial ficará salva após a assinatura.`
+        : `A Administração enviou o seu holerite do mês de ${months[slipData.month - 1]}/${slipData.year}. Acesse o aplicativo para assinar e devolver. Sua via oficial ficará salva para você após a assinatura.`;
 
       await createNotification(
         selectedAdminEmployee.id,
@@ -1415,7 +1389,9 @@ export default function MySalarySlips() {
         'payroll'
       );
 
-      alert(isVacation ? 'Documentações de Férias criadas e enviadas ao colaborador com sucesso! A via da empresa foi registrada e uma cópia oficial foi salva com sucesso no aplicativo do colaborador.' : 'Holerite despachado com sucesso! A via da empresa foi registrada e uma cópia oficial foi salva diretamente no aplicativo do colaborador.');
+      alert(isVacation 
+        ? 'Documentações de Férias enviadas ao colaborador com sucesso! Assim que ele assinar e devolver pelo aplicativo, a via oficial será arquivada e salva no app dele.' 
+        : 'Holerite despachado ao colaborador com sucesso! Assim que o colaborador assinar e devolver pelo aplicativo, a via oficial será arquivada e salva para ele no aplicativo.');
       setShowAddSlipModal(false);
       fetchData(); // Refresh list
     } catch (err) {
@@ -1544,7 +1520,7 @@ export default function MySalarySlips() {
                   onClick={() => {
                     setAdminSidebarTab('employees');
                     setSelectedSlip(null);
-                    const firstEmp = employees.find(emp => emp.role !== 'admin');
+                    const firstEmp = employees.find(emp => emp.role !== 'admin' && emp.active !== false);
                     setSelectedAdminEmployee(firstEmp || null);
                   }}
                   type="button"
@@ -1561,7 +1537,7 @@ export default function MySalarySlips() {
                   onClick={() => {
                     setAdminSidebarTab('admins');
                     setSelectedSlip(null);
-                    const firstAdmin = employees.find(emp => emp.role === 'admin');
+                    const firstAdmin = employees.find(emp => emp.role === 'admin' && emp.active !== false);
                     setSelectedAdminEmployee(firstAdmin || null);
                   }}
                   type="button"
@@ -1578,7 +1554,7 @@ export default function MySalarySlips() {
               
               <div className="space-y-2 max-h-[440px] overflow-y-auto pr-1">
                 {employees
-                  .filter(emp => adminSidebarTab === 'employees' ? emp.role !== 'admin' : emp.role === 'admin')
+                  .filter(emp => emp.active !== false && (adminSidebarTab === 'employees' ? emp.role !== 'admin' : emp.role === 'admin'))
                   .map(emp => (
                     <button 
                       key={emp.id}
@@ -1601,7 +1577,7 @@ export default function MySalarySlips() {
                     </button>
                   ))}
                 
-                {employees.filter(emp => adminSidebarTab === 'employees' ? emp.role !== 'admin' : emp.role === 'admin').length === 0 && (
+                {employees.filter(emp => emp.active !== false && (adminSidebarTab === 'employees' ? emp.role !== 'admin' : emp.role === 'admin')).length === 0 && (
                   <p className="text-center py-6 text-xs text-slate-400 font-medium">Nenhum registro encontrado.</p>
                 )}
               </div>
@@ -1938,10 +1914,17 @@ export default function MySalarySlips() {
                           {selectedSlip.signed ? 'ASSINADO' : 'PENDENTE DE ASSINATURA'}
                         </span>
 
-                        <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest bg-blue-50 text-blue-700 flex items-center gap-1">
-                          <CheckCircle2 className="w-2.5 h-2.5 text-blue-600" />
-                          Cópia do Colaborador Salva no App
-                        </span>
+                        {selectedSlip.signed ? (
+                          <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest bg-emerald-50 text-emerald-700 flex items-center gap-1 border border-emerald-200/50">
+                            <CheckCircle2 className="w-2.5 h-2.5 text-emerald-600" />
+                            Cópia Salva no App do Colaborador
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest bg-amber-50 text-amber-700 flex items-center gap-1 border border-amber-200/50">
+                            <Clock className="w-2.5 h-2.5 text-amber-600" />
+                            Aguardando Assinatura do Colaborador (Cópia será salva após devolução)
+                          </span>
+                        )}
 
                         <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest bg-slate-100 text-slate-650 flex items-center gap-1">
                           <ShieldCheck className="w-2.5 h-2.5 text-slate-500" />
@@ -1985,19 +1968,6 @@ export default function MySalarySlips() {
                         >
                           <ShieldCheck className="w-3.5 h-3.5 animate-bounce" />
                           Assinar Via Celular
-                        </button>
-                      )}
-
-                      {isAdmin && selectedSlip.signed && !selectedSlip.adminSigned && (
-                        <button 
-                          onClick={() => {
-                            setTypedName(user?.name || '');
-                            setShowSignModal(true);
-                          }}
-                          className="flex-1 sm:flex-none px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-lg shadow-indigo-500/15 flex items-center justify-center gap-1.5 transition-all cursor-pointer animate-pulse"
-                        >
-                          <ShieldCheck className="w-3.5 h-3.5" />
-                          Homologar Holerite
                         </button>
                       )}
                     </div>
@@ -2082,9 +2052,15 @@ export default function MySalarySlips() {
                                     <div className="font-bold text-[7.5px] text-zinc-900 leading-none uppercase">
                                       Folha Mensal
                                     </div>
-                                    <div className="text-[6.5px] font-bold text-blue-900 mt-0.5 tracking-tight">
-                                      Cópia do Colaborador • Salva no App
-                                    </div>
+                                    {selectedSlip.signed ? (
+                                      <div className="text-[6.5px] font-bold text-emerald-800 mt-0.5 tracking-tight">
+                                        ✓ Cópia do Colaborador • Salva no App
+                                      </div>
+                                    ) : (
+                                      <div className="text-[6.5px] font-bold text-amber-700 mt-0.5 tracking-tight">
+                                        Pendente de Assinatura do Colaborador
+                                      </div>
+                                    )}
                                   </div>
                                   <div className="font-extrabold text-[8.5px] text-black">
                                     {months[selectedSlip.month - 1]} de {selectedSlip.year}
@@ -2284,67 +2260,53 @@ export default function MySalarySlips() {
                                 </div>
                               </div>
 
-                              {/* SIGNATURE GRID */}
-                              <div className="grid grid-cols-12 gap-x-2 pt-2 border-t border-black bg-white min-h-[85px]">
-                                <div className="col-span-6 flex flex-col justify-between items-center text-center p-1.5 pb-1 min-h-[75px] border-r border-zinc-205 pr-2">
-                                  <div className="text-[6.5px] uppercase tracking-wider font-extrabold text-zinc-400 font-sans">Emissor</div>
-                                  <div className="flex-1 flex items-center justify-center my-1.5">
-                                    {selectedSlip.adminSigned ? (
-                                      <div className="flex flex-col items-center justify-center pointer-events-none select-none">
-                                        {selectedSlip.adminSignatureDataUrl ? (
-                                          <img 
-                                            src={selectedSlip.adminSignatureDataUrl} 
-                                            alt="Visto Administrador" 
-                                            className="h-7 max-w-[155px] object-contain drop-shadow mix-blend-multiply" 
-                                          />
-                                        ) : (
-                                          <span className="signature-font text-[13px] text-zinc-700 font-bold italic block select-none">
-                                            {selectedSlip.adminSignatureText || 'Administrador'}
-                                          </span>
-                                        )}
-                                        <span className="text-[5.5px] font-mono text-zinc-500 scale-90 block mt-0.5 tracking-tighter uppercase whitespace-nowrap">
-                                          ESTABELECIMENTO VIA IP {selectedSlip.adminSignerIp || '177.44.12.92'} • {format(new Date(selectedSlip.adminSignedAt), "dd/MM/yyyy")}
-                                        </span>
-                                      </div>
-                                    ) : (
-                                      <span className="signature-font text-[14px] text-zinc-450 select-none block italic font-bold">ADMINISTRADOR</span>
-                                    )}
-                                  </div>
-                                  <div className="border-t border-black w-11/12 pt-1 font-bold text-[7px] uppercase truncate">
-                                    {company?.name || 'SENTINELA SERVICOS TERCEIRIZACOES LTDA'}
-                                  </div>
+                              {/* SIGNATURE SECTION: SOMENTE COLABORADOR E DATA DA ASSINATURA */}
+                              <div className="pt-2 border-t border-black bg-white min-h-[78px] px-2.5 pb-1.5 flex flex-col justify-between">
+                                <div className="text-[6.5px] text-zinc-600 font-sans leading-tight italic">
+                                  DECLARAÇÃO DE RECEBIMENTO: Reconheço que recebi a importância líquida discriminada neste recibo, correspondente à quitação das verbas remuneratórias do período indicado.
                                 </div>
 
-                                <div className="col-span-6 flex flex-col justify-between items-center text-center p-1.5 pb-1 min-h-[75px] pl-2">
-                                  <div className="text-[6.5px] uppercase tracking-wider font-extrabold text-blue-600 font-sans">Declaração de Recebimento</div>
-                                  
-                                  <div className="flex-1 flex items-center justify-center my-1">
-                                    {selectedSlip.signed ? (
-                                      <div className="flex flex-col items-center justify-center pointer-events-none select-none">
-                                        {selectedSlip.signatureDataUrl ? (
-                                          <img 
-                                            src={selectedSlip.signatureDataUrl} 
-                                            alt="Visto Colaborador" 
-                                            className="h-7 max-w-[155px] object-contain drop-shadow mix-blend-multiply" 
-                                          />
-                                        ) : (
-                                          <span className="signature-font text-[13px] text-blue-900 font-bold italic block select-none">
-                                            {selectedSlip.signatureText || targetEmployeeName}
-                                          </span>
-                                        )}
-                                        <span className="text-[5px] font-mono text-zinc-500 scale-90 block mt-0.5 tracking-tighter uppercase whitespace-nowrap">
-                                          VIA IP {selectedSlip.signerIp || '177.44.12.92'} • {format(new Date(selectedSlip.signedAt), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })}
-                                        </span>
-                                      </div>
-                                    ) : (
-                                      <div className="text-orange-500 font-bold border border-dashed border-orange-200 bg-orange-50/55 rounded bg-orange-50/50 px-2 py-0.5 uppercase tracking-wider text-[7px]">
-                                        Aguardando Assinatura
-                                      </div>
-                                    )}
+                                <div className="grid grid-cols-12 gap-4 items-end pt-2">
+                                  {/* DATA DA ASSINATURA */}
+                                  <div className="col-span-3 text-center border-t border-black pt-1">
+                                    <span className="block text-[6px] font-bold text-zinc-500 uppercase tracking-tight mb-0.5">Data da Assinatura</span>
+                                    <span className="font-extrabold text-[8px] font-mono block text-neutral-900">
+                                      {selectedSlip.signed && selectedSlip.signedAt 
+                                        ? format(new Date(selectedSlip.signedAt), "dd/MM/yyyy") 
+                                        : '____/____/________'}
+                                    </span>
                                   </div>
-                                  
-                                  <div className="border-t border-black w-11/12 pt-1 font-bold text-[7px] uppercase truncate">
-                                    ASSINATURA ELETRÔNICA • {targetEmployeeName}
+
+                                  {/* ASSINATURA DO COLABORADOR */}
+                                  <div className="col-span-9 flex flex-col items-center justify-end text-center min-h-[44px]">
+                                    <div className="flex-1 flex items-center justify-center mb-1">
+                                      {selectedSlip.signed ? (
+                                        <div className="flex flex-col items-center justify-center pointer-events-none select-none">
+                                          {selectedSlip.signatureDataUrl ? (
+                                            <img 
+                                              src={selectedSlip.signatureDataUrl} 
+                                              alt="Assinatura do Colaborador" 
+                                              className="h-8 max-w-[200px] object-contain drop-shadow mix-blend-multiply" 
+                                            />
+                                          ) : (
+                                            <span className="signature-font text-[14px] text-blue-900 font-bold italic block select-none">
+                                              {selectedSlip.signatureText || targetEmployeeName}
+                                            </span>
+                                          )}
+                                          <span className="text-[5.5px] font-mono text-zinc-500 scale-90 block mt-0.5 tracking-tighter uppercase whitespace-nowrap">
+                                            ASSINADO DIGITALMENTE EM {format(new Date(selectedSlip.signedAt), "dd/MM/yyyy 'às' HH:mm", { locale: ptBR })} • IP {selectedSlip.signerIp || '177.44.12.92'} • CÓPIA ARQUIVADA NO APP
+                                          </span>
+                                        </div>
+                                      ) : (
+                                        <div className="text-amber-700 font-bold border border-dashed border-amber-300 bg-amber-50/60 rounded px-3 py-1 uppercase tracking-wider text-[7px]">
+                                          Aguardando Assinatura do Colaborador (Cópia será salva após devolução)
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    <div className="border-t border-black w-full pt-1 font-bold text-[7.5px] uppercase truncate">
+                                      ASSINATURA DO FUNCIONÁRIO • {targetEmployeeName}
+                                    </div>
                                   </div>
                                 </div>
                               </div>
@@ -3414,6 +3376,34 @@ export default function MySalarySlips() {
                             <div className="p-2 text-[6px] leading-[1.1] text-zinc-500 border-t border-zinc-250">
                               * COMUNICAMOS QUE AS FÉRIAS SERÃO CONCEDIDAS AO COLABORADOR NO PERÍODO DESIGNADO. ESTE DOCUMENTO CONSTITUI AVISO PRÉVIO E COMPROVANTE ELETRÔNICO SOB AS REGRAS CLT.
                             </div>
+
+                            {/* SIGNATURE SECTION PREVIEW: SOMENTE COLABORADOR E DATA */}
+                            <div className="pt-2 border-t border-black bg-white min-h-[70px] px-2.5 pb-1 flex flex-col justify-between">
+                              <div className="text-[6px] text-zinc-600 font-sans leading-tight italic">
+                                DECLARAÇÃO DE RECEBIMENTO DE FÉRIAS: Reconheço que recebi a quantia líquida supra discriminada, correspondente às minhas férias e abonos legais.
+                              </div>
+
+                              <div className="grid grid-cols-12 gap-3 items-end pt-1.5">
+                                <div className="col-span-3 text-center border-t border-black pt-1">
+                                  <span className="block text-[6px] font-bold text-zinc-500 uppercase tracking-tight mb-0.5">Data da Assinatura</span>
+                                  <span className="font-extrabold text-[7.5px] font-mono block text-neutral-500">
+                                    ____/____/________
+                                  </span>
+                                </div>
+
+                                <div className="col-span-9 flex flex-col items-center justify-end text-center min-h-[38px]">
+                                  <div className="flex-1 flex items-center justify-center mb-1">
+                                    <div className="text-amber-700 font-bold border border-dashed border-amber-300 bg-amber-50/60 rounded px-2.5 py-0.5 uppercase tracking-wider text-[6.5px]">
+                                      Aguardando Assinatura do Colaborador (Cópia será salva após devolução)
+                                    </div>
+                                  </div>
+
+                                  <div className="border-t border-black w-full pt-1 font-bold text-[7px] uppercase truncate">
+                                    ASSINATURA DO FUNCIONÁRIO • {selectedAdminEmployee.name}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
                           </>
                         );
                       }
@@ -3443,8 +3433,8 @@ export default function MySalarySlips() {
                                 <div className="font-bold text-[7.5px] text-zinc-900 leading-none uppercase">
                                   Folha Mensal
                                 </div>
-                                <div className="text-[6.5px] font-bold text-blue-900 mt-0.5 tracking-tight">
-                                  Cópia do Colaborador • Salva no App
+                                <div className="text-[6.5px] font-bold text-amber-700 mt-0.5 tracking-tight">
+                                  Pendente de Assinatura (Salvo após devolução)
                                 </div>
                               </div>
                               <div className="font-extrabold text-[8.5px] text-black">
@@ -3577,6 +3567,34 @@ export default function MySalarySlips() {
                             <div className="col-span-2 p-0.5 flex flex-col justify-between">
                               <span className="block text-[5.5px] font-bold text-zinc-500">Faixa IRPF</span>
                               <span className="font-extrabold text-[7.5px] font-mono leading-none">{previewCalc.faixaIrrf}</span>
+                            </div>
+                          </div>
+
+                          {/* SIGNATURE SECTION PREVIEW: SOMENTE COLABORADOR E DATA */}
+                          <div className="pt-2 border-t border-black bg-white min-h-[70px] px-2.5 pb-1 flex flex-col justify-between">
+                            <div className="text-[6px] text-zinc-600 font-sans leading-tight italic">
+                              DECLARAÇÃO DE RECEBIMENTO: Reconheço que recebi a importância líquida discriminada neste recibo, correspondente à quitação das verbas remuneratórias do período indicado.
+                            </div>
+
+                            <div className="grid grid-cols-12 gap-3 items-end pt-1.5">
+                              <div className="col-span-3 text-center border-t border-black pt-1">
+                                <span className="block text-[6px] font-bold text-zinc-500 uppercase tracking-tight mb-0.5">Data da Assinatura</span>
+                                <span className="font-extrabold text-[7.5px] font-mono block text-neutral-500">
+                                  ____/____/________
+                                </span>
+                              </div>
+
+                              <div className="col-span-9 flex flex-col items-center justify-end text-center min-h-[38px]">
+                                <div className="flex-1 flex items-center justify-center mb-1">
+                                  <div className="text-amber-700 font-bold border border-dashed border-amber-300 bg-amber-50/60 rounded px-2.5 py-0.5 uppercase tracking-wider text-[6.5px]">
+                                    Aguardando Assinatura do Colaborador (Cópia será salva após devolução)
+                                  </div>
+                                </div>
+
+                                <div className="border-t border-black w-full pt-1 font-bold text-[7px] uppercase truncate">
+                                  ASSINATURA DO FUNCIONÁRIO • {selectedAdminEmployee.name}
+                                </div>
+                              </div>
                             </div>
                           </div>
                         </>

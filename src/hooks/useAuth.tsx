@@ -64,15 +64,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               }
             }
 
-            // Ensure account active status is true to grant access
-            if (data.active === false) {
-              const ref = doc(db, 'users', firebaseUser.uid);
-              updateDoc(ref, { active: true }).catch(err => {
-                console.error("Auto-activating user error:", err);
-              });
-            }
-
-            setUser({ uid: firebaseUser.uid, ...data, active: true, department: dept } as User);
+            setUser({ uid: firebaseUser.uid, ...data, active: data.active !== false, department: dept } as User);
             setLoading(false);
           } else {
             // Document not found directly by UID! Try to recover/link pre-registered document

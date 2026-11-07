@@ -70,22 +70,23 @@ export default function AdminVacations() {
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 5 }, (_, i) => currentYear - 2 + i);
 
-  // Fetch employees and company config
+  // Fetch employees and company config in real time
   useEffect(() => {
-    const fetchEmployees = async () => {
-      try {
-        const snapshot = await getDocs(collection(db, 'users'));
-        const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
-        const onlyEmployees = list.filter((u: any) => u.role === 'employee');
-        setEmployees(onlyEmployees);
-        if (onlyEmployees.length > 0) {
-          setSelectedUser(onlyEmployees[0]);
-          setFormData(prev => ({ ...prev, vacationSalary: onlyEmployees[0].salary || 2500 }));
+    const qUsers = query(collection(db, 'users'));
+    const unsubUsers = onSnapshot(qUsers, (snapshot) => {
+      const list = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+      const onlyEmployees = list.filter((u: any) => u.role === 'employee' && u.active !== false);
+      setEmployees(onlyEmployees);
+      setSelectedUser(current => {
+        if (current) {
+          const stillExists = onlyEmployees.find((u: any) => u.id === current.id);
+          if (stillExists) return stillExists;
         }
-      } catch (err) {
-        console.error('Error fetching employees:', err);
-      }
-    };
+        return onlyEmployees.length > 0 ? onlyEmployees[0] : null;
+      });
+    }, (err) => {
+      console.error('Error fetching employees in real-time:', err);
+    });
 
     const unsubCompany = onSnapshot(doc(db, "company", "config"), (snapshot) => {
       if (snapshot.exists()) {
@@ -93,10 +94,12 @@ export default function AdminVacations() {
       }
     });
 
-    fetchEmployees();
     fetchVacations();
 
-    return unsubCompany;
+    return () => {
+      unsubUsers();
+      unsubCompany();
+    };
   }, []);
 
   const fetchVacations = async () => {
@@ -322,6 +325,7 @@ export default function AdminVacations() {
   // Searching & Filtering
   const filteredSlips = vacationSlips.filter(v => {
     const emp = employees.find(e => e.id === v.userId);
+    if (!emp || emp.active === false) return false;
     const empName = emp?.name || '';
     const matchesSearch = empName.toLowerCase().includes(searchTerm.toLowerCase());
     

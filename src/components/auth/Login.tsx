@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, sendPasswordResetEmail } from 'firebase/auth';
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, GoogleAuthProvider, signInWithPopup, sendPasswordResetEmail, signOut } from 'firebase/auth';
 import { collection, query, where, getDocs, limit, setDoc, doc, getDoc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { auth, db } from '../../lib/firebase';
 import { motion } from 'motion/react';
@@ -270,8 +270,9 @@ export default function LoginPage() {
         }
       } else {
         const userData = userDoc.data();
-        if (!userData.active) {
-          await updateDoc(doc(db, 'users', user.uid), { active: true });
+        if (userData.active === false && userData.role !== 'admin') {
+          await signOut(auth);
+          throw new Error('Este colaborador foi desligado da empresa. O acesso ao sistema está bloqueado.');
         }
       }
     } catch (err: any) {
@@ -358,6 +359,9 @@ export default function LoginPage() {
 
         if (userDoc) {
           const userData = userDoc.data();
+          if (userData.active === false && userData.role !== 'admin') {
+            throw new Error('Colaborador desligado da empresa. O acesso a este sistema foi revogado.');
+          }
           if (userData.email) {
             targetEmails.push(userData.email.trim().toLowerCase());
           }

@@ -128,7 +128,7 @@ export default function MealAllowanceReceipts() {
     const unsub = onSnapshot(q, (snapshot) => {
       const employeeList = snapshot.docs
         .map(doc => ({ id: doc.id, ...doc.data() }))
-        .filter((u: any) => u.role !== 'admin'); // EXCLUDE admins
+        .filter((u: any) => u.role !== 'admin' && u.active !== false); // EXCLUDE admins and dismissed employees
       setEmployees(employeeList);
       setSelectedEmployee(current => {
         if (current) {
@@ -488,9 +488,11 @@ export default function MealAllowanceReceipts() {
   };
 
   const filteredEmployees = employees.filter(emp => 
-    emp.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (emp.cpf && emp.cpf.includes(searchTerm)) ||
-    (emp.department && emp.department.toLowerCase().includes(searchTerm.toLowerCase()))
+    emp.active !== false && (
+      emp.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (emp.cpf && emp.cpf.includes(searchTerm)) ||
+      (emp.department && emp.department.toLowerCase().includes(searchTerm.toLowerCase()))
+    )
   );
 
   return (
