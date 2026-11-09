@@ -21,6 +21,7 @@ import {
 import { cn } from '../../lib/utils';
 import { createNotification } from '../../lib/notifications';
 import { motion, AnimatePresence } from 'motion/react';
+import { calculateBaseIrrf } from '../../lib/payrollRubrics';
 
 interface TaxItem {
   name: string;
@@ -129,9 +130,9 @@ export default function AdminVacations() {
     else if (base <= 4000.03) inss = (base * 0.12) - 101.18;
     else inss = (base * 0.14) - 181.18;
 
-    // IRPF simplified model
+    // IRPF conforme regra obrigatória (menor entre Base Tradicional e Base Simplificada)
     let irpf = 0;
-    const baseCalculo = base - inss;
+    const baseCalculo = calculateBaseIrrf(base, inss);
     if (baseCalculo <= 2259.20) irpf = 0;
     else if (baseCalculo <= 2826.65) irpf = (baseCalculo * 0.075) - 169.44;
     else if (baseCalculo <= 3751.05) irpf = (baseCalculo * 0.15) - 381.44;
@@ -140,7 +141,8 @@ export default function AdminVacations() {
 
     return {
       inss: Number(Math.max(0, inss).toFixed(2)),
-      irpf: Number(Math.max(0, irpf).toFixed(2))
+      irpf: Number(Math.max(0, irpf).toFixed(2)),
+      baseIrrf: baseCalculo
     };
   };
 
@@ -154,7 +156,7 @@ export default function AdminVacations() {
     const deductionsTotal = customDeductions.reduce((acc, c) => acc + c.amount, 0);
     
     const baseTaxes = vSalary + constThird + additionsTotal;
-    const { inss, irpf } = calculateTaxes(baseTaxes);
+    const { inss, irpf, baseIrrf } = calculateTaxes(baseTaxes);
     
     const grossTotal = baseTaxes;
     const taxesTotal = inss + irpf + deductionsTotal;
@@ -165,6 +167,7 @@ export default function AdminVacations() {
       constThird,
       inss,
       irpf,
+      baseIrrf,
       taxesTotal,
       netSalary
     };
@@ -249,7 +252,8 @@ export default function AdminVacations() {
         acquisitionStart: formData.acquisitionStart,
         acquisitionEnd: formData.acquisitionEnd,
         vacationSalary: Number(formData.vacationSalary),
-        hasConstitutionalThird: formData.hasConstitutionalThird
+        hasConstitutionalThird: formData.hasConstitutionalThird,
+        baseIrrf: outcomes.baseIrrf
       };
 
       await addDoc(collection(db, 'salarySlips'), slipData);

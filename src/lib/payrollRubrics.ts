@@ -7,6 +7,7 @@ export interface PayrollRubric {
   name: string;
   type: 'addition' | 'deduction' | 'info';
   defaultReference?: string;
+  defaultAmount?: number;
   isSystem?: boolean;
 }
 
@@ -33,9 +34,20 @@ export interface PayrollTotals {
   inssValorCalculado: number;
 }
 
+/**
+ * Retorna os dias do mês formatado como referência para a rubrica 8781 (ex: '30,00', '31,00', '28,00', '29,00')
+ */
+export function getMonthDaysReference(month?: number | string, year?: number | string): string {
+  const now = new Date();
+  const m = Number(month) || (now.getMonth() + 1);
+  const y = Number(year) || now.getFullYear();
+  const days = new Date(y, m, 0).getDate();
+  return `${days},00`;
+}
+
 // Catálogo base brasileiro CLT com os códigos e descrições padronizados
 export const DEFAULT_PAYROLL_RUBRICS: PayrollRubric[] = [
-  { code: '8781', name: 'DIAS NORMAIS (SALÁRIO BASE)', type: 'addition', defaultReference: '31,00', isSystem: true },
+  { code: '8781', name: 'DIAS NORMAIS (SALÁRIO BASE)', type: 'addition', defaultReference: '30,00', isSystem: true },
   { code: '0150', name: 'HORAS EXTRAS 50%', type: 'addition', defaultReference: '07:30', isSystem: true },
   { code: '0151', name: 'HORAS EXTRAS 100%', type: 'addition', defaultReference: '08:00', isSystem: true },
   { code: '0160', name: 'ADICIONAL NOTURNO 20%', type: 'addition', defaultReference: '20,00%', isSystem: true },
@@ -51,9 +63,11 @@ export const DEFAULT_PAYROLL_RUBRICS: PayrollRubric[] = [
   { code: '9382', name: 'VALE ALIMENTAÇÃO', type: 'info', defaultReference: '15,00', isSystem: true },
   { code: '998', name: 'INSS - PREVIDÊNCIA SOCIAL (CLT)', type: 'deduction', defaultReference: '7,90%', isSystem: true },
   { code: '508', name: 'IRRF - IMPOSTO DE RENDA RETIDO NA FONTE', type: 'deduction', defaultReference: '7,50%', isSystem: true },
-  { code: '0201', name: 'DESC. VALE REFEIÇÃO / ALIMENTAÇÃO (1%)', type: 'deduction', defaultReference: '1,00%', isSystem: true },
+  { code: '0201', name: 'DESC. VALE REFEIÇÃO / ALIMENTAÇÃO (1%)', type: 'deduction', defaultReference: '1,00%', defaultAmount: 3.96, isSystem: true },
+  { code: '201', name: 'DESC. VALE REFEIÇÃO / ALIMENTAÇÃO', type: 'deduction', defaultReference: '1,00%', defaultAmount: 3.96, isSystem: true },
   { code: '0202', name: 'DESC. VALE TRANSPORTE (6%)', type: 'deduction', defaultReference: '6,00%', isSystem: true },
-  { code: '0203', name: 'SEGURO DE VIDA EM GRUPO', type: 'deduction', defaultReference: '-', isSystem: true },
+  { code: '0203', name: 'SEGURO DE VIDA EM GRUPO', type: 'deduction', defaultReference: '1,12', defaultAmount: 1.12, isSystem: true },
+  { code: '203', name: 'SEGURO DE VIDA EM GRUPO', type: 'deduction', defaultReference: '1,12', defaultAmount: 1.12, isSystem: true },
   { code: '0620', name: 'ADIANTAMENTO SALARIAL / QUINZENA', type: 'deduction', defaultReference: 'Adiant.', isSystem: true },
   { code: '0625', name: 'FALTAS E DIAS NÃO TRABALHADOS', type: 'deduction', defaultReference: '01 Dia', isSystem: true },
   { code: '0626', name: 'D.S.R. S/ FALTAS', type: 'deduction', defaultReference: '01 Dia', isSystem: true },
@@ -65,8 +79,24 @@ export const DEFAULT_PAYROLL_RUBRICS: PayrollRubric[] = [
 /**
  * Encontra ou sugere o código e referência padrão para uma rubrica pelo nome
  */
-export function matchRubricDetails(name: string, type: 'addition' | 'deduction' | 'info' = 'addition', catalog: PayrollRubric[] = DEFAULT_PAYROLL_RUBRICS) {
+export function matchRubricDetails(
+  name: string,
+  type: 'addition' | 'deduction' | 'info' = 'addition',
+  catalog: PayrollRubric[] = DEFAULT_PAYROLL_RUBRICS,
+  month?: number | string,
+  year?: number | string
+) {
   const norm = (name || '').trim().toUpperCase();
+
+  // Regras de fallback inteligentes para salário base
+  if (norm.includes('BASE') || norm.includes('CONTRATUAL') || norm.includes('DIAS NORMAIS') || norm === 'SALÁRIO BASE') {
+    return {
+      code: '8781',
+      description: name || 'DIAS NORMAIS',
+      reference: getMonthDaysReference(month, year),
+      type: 'addition' as const
+    };
+  }
 
   // Busca exata ou por substring no catálogo
   const found = catalog.find(r => {
@@ -75,17 +105,14 @@ export function matchRubricDetails(name: string, type: 'addition' | 'deduction' 
   });
 
   if (found) {
+    const isBase = found.code === '8781' || found.name.toUpperCase().includes('DIAS NORMAIS') || found.name.toUpperCase().includes('SALÁRIO BASE');
     return {
       code: found.code,
       description: found.name,
-      reference: found.defaultReference || '-',
+      reference: isBase ? getMonthDaysReference(month, year) : (found.defaultReference || '-'),
+      defaultAmount: found.defaultAmount,
       type: found.type
     };
-  }
-
-  // Regras de fallback inteligentes
-  if (norm.includes('BASE') || norm.includes('CONTRATUAL') || norm.includes('DIAS NORMAIS') || norm === 'SALÁRIO BASE') {
-    return { code: '8781', description: name, reference: '31,00', type: 'addition' as const };
   }
   if (norm.includes('EXTRA') || norm.includes('HORAS EXTRAS')) {
     return { code: '0150', description: name, reference: '07:30', type: 'addition' as const };
@@ -117,8 +144,11 @@ export function matchRubricDetails(name: string, type: 'addition' | 'deduction' 
   if (norm.includes('VALE TRANSP')) {
     return { code: '0202', description: name, reference: '6,00%', type: 'deduction' as const };
   }
-  if (norm.includes('SEGURO')) {
-    return { code: '0203', description: name, reference: '-', type: 'deduction' as const };
+  if (norm.includes('203') || norm.includes('SEGURO') || norm.includes('VIDA')) {
+    return { code: '203', description: name || 'SEGURO DE VIDA EM GRUPO', reference: '1,12', defaultAmount: 1.12, type: 'deduction' as const };
+  }
+  if (norm.includes('201') || ((norm.includes('VALE') || norm.includes('REFEI') || norm.includes('ALIMENTA')) && norm.includes('DESC'))) {
+    return { code: '201', description: name || 'DESC. VALE REFEIÇÃO / ALIMENTAÇÃO', reference: '1,00%', defaultAmount: 3.96, type: 'deduction' as const };
   }
   if (norm.includes('FALTA')) {
     return { code: '0625', description: name, reference: '01 Dia', type: 'deduction' as const };
@@ -161,6 +191,23 @@ export function calculateInss(grossSalary: number): { inss: number; effectiveRat
     inss: Number(Math.max(0, inss).toFixed(2)),
     effectiveRate
   };
+}
+
+/**
+ * REGRA OBRIGATÓRIA PARA CÁLCULO AUTOMÁTICO DA BASE IRRF:
+ * 1. Calcule a Base Tradicional: Salário Bruto - Desconto de INSS digitado (mínimo 0).
+ * 2. Calcule a Base Simplificada: Salário Bruto - 607.20 (limite mínimo de 0).
+ * 3. O valor final do campo "Base Calc. IRRF" DEVE ser o MENOR valor entre a Base Tradicional e a Base Simplificada.
+ */
+export function calculateBaseIrrf(salarioBruto: number, inssDigitado: number): number {
+  const bruto = Math.max(0, Number(salarioBruto) || 0);
+  const inss = Math.max(0, Number(inssDigitado) || 0);
+
+  const baseTradicional = Math.max(0, bruto - inss);
+  const baseSimplificada = Math.max(0, bruto - 607.20);
+
+  const finalBase = Math.min(baseTradicional, baseSimplificada);
+  return Number(finalBase.toFixed(2));
 }
 
 /**
@@ -252,7 +299,11 @@ export function calculatePayrollTotals(items: SalarySlipLineItem[], fallbackBase
   const baseFgts = Number(totalAdditions.toFixed(2));
   const fgtsMes = Number((baseFgts * 0.08).toFixed(2));
 
-  const baseIrrf = Number(Math.max(0, totalAdditions - inssToUse).toFixed(2));
+  // REGRA OBRIGATÓRIA PARA CÁLCULO AUTOMÁTICO DA BASE IRRF:
+  // 1. Base Tradicional: Salário Bruto - Desconto de INSS digitado
+  // 2. Base Simplificada: Salário Bruto - 607.20 (limite mínimo de 0)
+  // 3. O valor final do campo "Base Calc. IRRF" DEVE ser o MENOR valor entre a Base Tradicional e a Base Simplificada
+  const baseIrrf = calculateBaseIrrf(totalAdditions, inssToUse);
   const autoIrrf = calculateIrrf(baseIrrf);
 
   return {

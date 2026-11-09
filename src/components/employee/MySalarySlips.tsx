@@ -41,6 +41,7 @@ import {
   Upload,
   Palmtree,
   RotateCw,
+  RotateCcw,
   BookOpen,
   Tag,
   Calculator,
@@ -59,8 +60,10 @@ import {
   calculatePayrollTotals, 
   calculateInss, 
   calculateIrrf, 
+  calculateBaseIrrf,
   PayrollTotals,
-  deduplicateSlipItems
+  deduplicateSlipItems,
+  getMonthDaysReference
 } from '../../lib/payrollRubrics';
 import { motion, AnimatePresence } from 'motion/react';
 import { createNotification } from '../../lib/notifications';
@@ -217,7 +220,7 @@ export default function MySalarySlips() {
       id: 'item-base-init',
       code: '8781',
       description: 'DIAS NORMAIS',
-      reference: '31,00',
+      reference: getMonthDaysReference(),
       type: 'addition',
       amount: 2500
     }
@@ -309,33 +312,55 @@ export default function MySalarySlips() {
       found = allRubrics.find(r => r.code === val);
     }
     if (found) {
+      const isBase = found.code === '8781' || found.name.toUpperCase().includes('DIAS NORMAIS') || found.name.toUpperCase().includes('SALÁRIO BASE');
+      let refToUse = isBase ? getMonthDaysReference(newSlipForm.month, newSlipForm.year) : (found.defaultReference || '-');
+      const is203 = found.code === '203' || found.code === '0203' || found.name.toUpperCase().includes('SEGURO');
+      const is201 = found.code === '201' || found.code === '0201' || (found.name.toUpperCase().includes('VALE') && found.name.toUpperCase().includes('DESC'));
+      if (is203) refToUse = '1,12';
+      const defaultVal = is203 ? '1.12' : (is201 ? '3.96' : (found.defaultAmount !== undefined ? String(found.defaultAmount) : ''));
       setItemInput(prev => ({
         ...prev,
         code: found.code,
         description: found.name,
         type: found.type,
-        reference: found.defaultReference || '-'
+        reference: refToUse,
+        amount: defaultVal !== '' ? defaultVal : prev.amount
       }));
     }
   };
 
   // Add line item to current slip
   const handleAddLineItem = () => {
-    const amountNum = Number(itemInput.amount);
+    let amountNum = Number(itemInput.amount);
     if (!itemInput.description.trim()) {
       alert('Informe a descrição da rubrica.');
       return;
     }
-    const isInfoItem = itemInput.type === 'info' || itemInput.code.trim() === '9382' || itemInput.code.trim() === '9392';
+    const cleanCode = itemInput.code.trim();
+    const is203 = cleanCode === '203' || cleanCode === '0203' || itemInput.description.toUpperCase().includes('SEGURO');
+    const is201 = cleanCode === '201' || cleanCode === '0201' || (itemInput.description.toUpperCase().includes('VALE') && itemInput.description.toUpperCase().includes('DESC'));
+    const isInfoItem = itemInput.type === 'info' || cleanCode === '9382' || cleanCode === '9392';
+
+    if (is203 && (!amountNum || isNaN(amountNum) || amountNum <= 0)) {
+      amountNum = 1.12;
+    }
+    if (is201 && (!amountNum || isNaN(amountNum) || amountNum <= 0)) {
+      amountNum = 3.96;
+    }
+
     if (!isInfoItem && (isNaN(amountNum) || amountNum <= 0)) {
       alert('Informe um valor válido em R$ maior que zero.');
       return;
     }
 
-    const byCode = itemInput.code.trim() ? allRubrics.find(r => r.code === itemInput.code.trim()) : null;
-    const matched = matchRubricDetails(itemInput.description, itemInput.type, allRubrics);
-    const codeToUse = itemInput.code.trim() || byCode?.code || matched.code;
-    const refToUse = itemInput.reference.trim() || byCode?.defaultReference || matched.reference || '-';
+    const byCode = cleanCode ? allRubrics.find(r => r.code === cleanCode || r.code.replace(/^0+/, '') === cleanCode.replace(/^0+/, '')) : null;
+    const matched = matchRubricDetails(itemInput.description, itemInput.type, allRubrics, newSlipForm.month, newSlipForm.year);
+    const codeToUse = cleanCode || byCode?.code || matched.code;
+    const isBaseItem = codeToUse === '8781' || itemInput.description.trim().toUpperCase().includes('DIAS NORMAIS') || itemInput.description.trim().toUpperCase().includes('SALÁRIO BASE');
+    const dynamicMonthRef = isBaseItem ? getMonthDaysReference(newSlipForm.month, newSlipForm.year) : undefined;
+    let refToUse = itemInput.reference.trim() || dynamicMonthRef || byCode?.defaultReference || matched.reference || '-';
+    if (is203) refToUse = '1,12';
+
     const typeToUse = isInfoItem ? 'info' : (byCode?.type || itemInput.type);
     const amountToUse = isInfoItem ? 0 : amountNum;
 
@@ -447,39 +472,7 @@ export default function MySalarySlips() {
     return () => unsubAtt();
   }, [isAdmin, selectedAdminEmployee]);
 
-  // Sync employee salary to base salary item when employee changes
-  useEffect(() => {
-    if (selectedAdminEmployee) {
-      const empSalary = Number(selectedAdminEmployee.salary) || 2500;
-      setNewSlipForm(prev => ({
-        ...prev,
-        userId: selectedAdminEmployee.id,
-        baseSalary: empSalary
-      }));
-      setNewSlipItems(prev => {
-        const hasBase = prev.some(it => it.code === '8781' || it.description.toUpperCase().includes('DIAS NORMAIS') || it.description.toUpperCase().includes('SALÁRIO BASE'));
-        if (hasBase) {
-          return prev.map(it => {
-            if (it.code === '8781' || it.description.toUpperCase().includes('DIAS NORMAIS') || it.description.toUpperCase().includes('SALÁRIO BASE')) {
-              return { ...it, amount: empSalary };
-            }
-            return it;
-          });
-        }
-        return [
-          {
-            id: `item-base-${Date.now()}`,
-            code: '8781',
-            description: 'DIAS NORMAIS',
-            reference: '31,00',
-            type: 'addition',
-            amount: empSalary
-          },
-          ...prev
-        ];
-      });
-    }
-  }, [selectedAdminEmployee]);
+
 
   const detectedSlipShifts = contarPlantoesTrabalhadosNoMes(
     empAttendanceForSlip,
@@ -615,17 +608,116 @@ export default function MySalarySlips() {
     return 'MAESTRO LOCADORA DE';
   };
 
-  // Sincroniza posto do colaborador automaticamente na criação do holerite
+  // Limpa e reseta integralmente o formulário de holerite para um preenchimento 100% novo e vazio
+  const resetSlipForm = (targetEmp?: any) => {
+    const emp = targetEmp || selectedAdminEmployee;
+    const curMonth = new Date().getMonth() + 1;
+    const curYear = new Date().getFullYear();
+    const empSalary = Number(emp?.salary) || 2500;
+    const autoShifts = contarPlantoesTrabalhadosNoMes(empAttendanceForSlip, emp?.id || '', curMonth, curYear) || 15;
+    const assignedPosto = findEmployeeServicePost(emp) || emp?.postoName || 'MAESTRO LOCADORA DE';
+
+    setSlipPlantoes(autoShifts);
+    
+    // Reseta o formulário
+    setNewSlipForm({
+      userId: emp?.id || '',
+      postoName: assignedPosto,
+      month: curMonth,
+      year: curYear,
+      baseSalary: empSalary,
+      additions: [],
+      deductions: [],
+      documentType: 'salary',
+      vacationStart: '',
+      vacationEnd: '',
+      acquisitionStart: '',
+      acquisitionEnd: '',
+      vacationSalary: empSalary,
+      hasConstitutionalThird: true,
+      autoCalculateTaxes: true
+    });
+
+    // Reseta as rubricas para conter EXCLUSIVAMENTE o salário base inicial com referência dinâmica de dias (30,00 / 31,00)
+    const daysRef = getMonthDaysReference(curMonth, curYear);
+    setNewSlipItems([
+      {
+        id: `item-base-${Date.now()}`,
+        code: '8781',
+        description: 'DIAS NORMAIS',
+        reference: daysRef,
+        type: 'addition',
+        amount: empSalary
+      }
+    ]);
+
+    // Limpa inputs de inclusão manual e seleções
+    setItemInput({
+      code: '',
+      description: '',
+      reference: '',
+      type: 'addition',
+      amount: ''
+    });
+    setTempItem({ name: '', amount: 0, type: 'addition' });
+    setSelectedCatalogCode('');
+    setAiError(null);
+    setAiSuccessMessage(null);
+    setAdminModalTab('form');
+    setSlipCreationMode('manual');
+    if (aiFileInputRef.current) {
+      aiFileInputRef.current.value = '';
+    }
+  };
+
+  const handleCloseAddSlipModal = () => {
+    resetSlipForm(selectedAdminEmployee);
+    setShowAddSlipModal(false);
+  };
+
+  // Sempre que mudar ou selecionar um colaborador, o formulário e as rubricas do holerite são 100% resetados limpos
   useEffect(() => {
     if (selectedAdminEmployee) {
-      const autoPost = findEmployeeServicePost(selectedAdminEmployee);
-      setNewSlipForm(prev => ({
-        ...prev,
-        userId: selectedAdminEmployee.id,
-        postoName: autoPost
-      }));
+      resetSlipForm(selectedAdminEmployee);
     }
-  }, [selectedAdminEmployee, servicePosts]);
+  }, [selectedAdminEmployee?.id]);
+
+  // Sincroniza dinamicamente a referência de dias (ex: 30,00 ou 31,00) da rubrica 8781 com base no mês e ano selecionados
+  // Mantém rigorosamente inalterado o valor nominal do salário base (amount)
+  useEffect(() => {
+    if (!newSlipForm.month || !newSlipForm.year) return;
+    const targetDaysRef = getMonthDaysReference(newSlipForm.month, newSlipForm.year);
+    setNewSlipItems(prev => {
+      let changed = false;
+      const updated = prev.map(item => {
+        const codeClean = (item.code || '').trim();
+        const descClean = (item.description || '').toUpperCase();
+        const isBase = codeClean === '8781' || descClean.includes('DIAS NORMAIS') || descClean.includes('SALÁRIO BASE') || descClean.includes('SALARIO BASE');
+        if (isBase) {
+          if (item.reference !== targetDaysRef) {
+            changed = true;
+            return {
+              ...item,
+              reference: targetDaysRef
+            };
+          }
+        }
+        return item;
+      });
+      return changed ? updated : prev;
+    });
+  }, [newSlipForm.month, newSlipForm.year]);
+
+  // Tecla Escape fecha e limpa a modal se estiver aberta
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && showAddSlipModal) {
+        handleCloseAddSlipModal();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [showAddSlipModal, selectedAdminEmployee]);
 
   // Fetch data depending on role in real time
   useEffect(() => {
@@ -934,9 +1026,9 @@ export default function MySalarySlips() {
     else if (salary <= 4000.03) inss = (salary * 0.12) - 101.18;
     else inss = (salary * 0.14) - 181.18;
 
-    // IRPF standard simplified model
+    // IRPF conforme regra obrigatória (menor entre Base Tradicional e Base Simplificada)
     let irpf = 0;
-    const baseCalculo = salary - inss;
+    const baseCalculo = calculateBaseIrrf(salary, inss);
     if (baseCalculo <= 2259.20) irpf = 0;
     else if (baseCalculo <= 2826.65) irpf = (baseCalculo * 0.075) - 169.44;
     else if (baseCalculo <= 3751.05) irpf = (baseCalculo * 0.15) - 381.44;
@@ -965,10 +1057,13 @@ export default function MySalarySlips() {
     if (norm.includes('BASE') || norm.includes('CONTRATUAL') || norm.includes('DIAS NORMAIS') || norm === 'SALÁRIO BASE') return '8781';
     if (norm.includes('REFLEXO') || norm.includes('DSR')) return '8125';
     if (norm.includes('EXTRA') || norm.includes('HORAS EXTRAS')) return '150';
+    if ((norm.includes('VALE') || norm.includes('REFEI') || norm.includes('ALIMENTA')) && norm.includes('DESC')) {
+      return '201';
+    }
     if (norm.includes('VALE ALIMENTAÇÃO') || norm.includes('VALE ALIMENTACAO') || norm.includes('VALE REFEIÇÃO') || norm.includes('VALE REFEICAO') || norm.includes('9382') || norm.includes('9392')) {
       return '9382';
     }
-    if (norm.includes('SEGURO') || norm.includes('VIDA')) return '203';
+    if (norm.includes('SEGURO') || norm.includes('VIDA') || norm.includes('203')) return '203';
     if (norm.includes('INSS') || norm === 'I.N.S.S.') return '998';
     if (norm.includes('IRPF') || norm.includes('IMPOSTO DE RENDA') || norm.includes('SIMPLIFICADO')) return '508';
     return fallbackCode;
@@ -992,11 +1087,13 @@ export default function MySalarySlips() {
       const totalAdditions = vacationSalary + constThird + extraAdditionsSum;
       
       const inss = Number(calculateInss(totalAdditions).inss.toFixed(2));
-      const irpf = Number(calculateIrrf(Math.max(0, totalAdditions - inss)).irrf.toFixed(2));
+      const baseIrrfVal = calculateBaseIrrf(totalAdditions, inss);
+      const autoIrrf = calculateIrrf(baseIrrfVal);
+      const irpf = Number(autoIrrf.irrf.toFixed(2));
 
       const taxes: any[] = [
         { name: 'INSS s/ Férias', amount: inss, type: 'deduction', code: '0910', reference: calculateInss(totalAdditions).effectiveRate },
-        ...(irpf > 0 ? [{ name: 'IRPF s/ Férias', amount: irpf, type: 'deduction', code: '0514', reference: calculateIrrf(Math.max(0, totalAdditions - inss)).faixa }] : [])
+        ...(irpf > 0 ? [{ name: 'IRPF s/ Férias', amount: irpf, type: 'deduction', code: '0514', reference: autoIrrf.faixa }] : [])
       ];
       extraAdditions.forEach(a => taxes.push({ name: a.description, amount: a.amount, type: 'addition', code: a.code, reference: a.reference }));
 
@@ -1024,8 +1121,8 @@ export default function MySalarySlips() {
         salContrInss: totalAdditions,
         baseFgts: totalAdditions,
         fgtsMes: Number((totalAdditions * 0.08).toFixed(2)),
-        baseIrrf: Math.max(0, totalAdditions - inss),
-        faixaIrrf: calculateIrrf(Math.max(0, totalAdditions - inss)).faixa,
+        baseIrrf: baseIrrfVal,
+        faixaIrrf: autoIrrf.faixa,
         items: newSlipItems
       };
     } else {
@@ -1158,19 +1255,21 @@ export default function MySalarySlips() {
         return c === '8781' || desc.includes('DIAS NORMAIS') || desc.includes('SALÁRIO BASE') || desc.includes('SALARIO BASE');
       });
 
+      const monthDaysRef = getMonthDaysReference(newSlipForm.month, newSlipForm.year);
+
       if (!hasBaseInAdditions) {
         parsedItems.push({
           id: `item-ai-base-${Date.now()}`,
           code: '8781',
           description: 'DIAS NORMAIS',
-          reference: '31,00',
+          reference: monthDaysRef,
           type: 'addition',
           amount: baseSalaryDetected
         });
       }
 
       (data.additions || []).forEach((a: any, idx: number) => {
-        const matched = matchRubricDetails(a.name || a.description, 'addition', allRubrics);
+        const matched = matchRubricDetails(a.name || a.description, 'addition', allRubrics, newSlipForm.month, newSlipForm.year);
         const code = a.code || matched.code;
         const desc = (a.name || a.description || matched.description).toUpperCase();
         const isBase = code === '8781' || desc.includes('DIAS NORMAIS') || desc.includes('SALÁRIO BASE') || desc.includes('SALARIO BASE');
@@ -1178,7 +1277,7 @@ export default function MySalarySlips() {
           id: `item-ai-add-${idx}-${Date.now()}`,
           code: isBase ? '8781' : code,
           description: isBase ? 'DIAS NORMAIS' : desc,
-          reference: isBase ? (a.reference || '31,00') : (a.reference || matched.reference),
+          reference: isBase ? (a.reference || monthDaysRef) : (a.reference || matched.reference),
           type: 'addition',
           amount: Number(a.amount) || (isBase ? baseSalaryDetected : 0)
         });
@@ -1186,13 +1285,22 @@ export default function MySalarySlips() {
 
       (data.deductions || []).forEach((d: any, idx: number) => {
         const matched = matchRubricDetails(d.name || d.description, 'deduction', allRubrics);
+        const code = d.code || matched.code;
+        const is203 = code === '203' || code === '0203' || (d.name || d.description || '').toUpperCase().includes('SEGURO');
+        const is201 = code === '201' || code === '0201' || ((d.name || d.description || '').toUpperCase().includes('VALE') && (d.name || d.description || '').toUpperCase().includes('DESC'));
+        const refVal = is203 ? '1,12' : (d.reference || matched.reference);
+        let amountVal = Number(d.amount) || 0;
+        if (amountVal <= 0) {
+          if (is203) amountVal = 1.12;
+          else if (is201) amountVal = 3.96;
+        }
         parsedItems.push({
           id: `item-ai-ded-${idx}-${Date.now()}`,
-          code: d.code || matched.code,
+          code: code,
           description: (d.name || d.description || matched.description).toUpperCase(),
-          reference: d.reference || matched.reference,
+          reference: refVal,
           type: 'deduction',
-          amount: Number(d.amount) || 0
+          amount: amountVal
         });
       });
 
@@ -1275,14 +1383,16 @@ export default function MySalarySlips() {
         const totalAdditions = vacationSalary + constThird + extraAdditions.reduce((acc, cur) => acc + cur.amount, 0);
 
         const inss = Number(calculateInss(totalAdditions).inss.toFixed(2));
-        const irpf = Number(calculateIrrf(Math.max(0, totalAdditions - inss)).irrf.toFixed(2));
+        const baseIrrfVal = calculateBaseIrrf(totalAdditions, inss);
+        const autoIrrf = calculateIrrf(baseIrrfVal);
+        const irpf = Number(autoIrrf.irrf.toFixed(2));
 
         const rawVacationItems: SalarySlipLineItem[] = [
           { id: 'vac-1', code: '0220', description: 'VALOR DAS FÉRIAS (GOZO)', reference: '30 Dias', type: 'addition', amount: vacationSalary },
           ...(newSlipForm.hasConstitutionalThird ? [{ id: 'vac-2', code: '0221', description: 'TERÇO CONSTITUCIONAL DE FÉRIAS (1/3)', reference: '33,33%', type: 'addition' as const, amount: constThird }] : []),
           ...extraAdditions,
           { id: 'vac-inss', code: '0910', description: 'INSS S/ FÉRIAS', reference: calculateInss(totalAdditions).effectiveRate, type: 'deduction' as const, amount: inss },
-          ...(irpf > 0 ? [{ id: 'vac-irpf', code: '0514', description: 'IRPF S/ FÉRIAS', reference: calculateIrrf(Math.max(0, totalAdditions - inss)).faixa, type: 'deduction' as const, amount: irpf }] : []),
+          ...(irpf > 0 ? [{ id: 'vac-irpf', code: '0514', description: 'IRPF S/ FÉRIAS', reference: autoIrrf.faixa, type: 'deduction' as const, amount: irpf }] : []),
           ...newSlipItems.filter(it => it.type === 'deduction' && it.code !== '0910' && it.code !== '0514')
         ];
 
@@ -1301,8 +1411,8 @@ export default function MySalarySlips() {
           salContrInss: Number(totalAdditions.toFixed(2)),
           baseFgts: Number(totalAdditions.toFixed(2)),
           fgtsMes: Number((totalAdditions * 0.08).toFixed(2)),
-          baseIrrf: Number(Math.max(0, totalAdditions - inss).toFixed(2)),
-          faixaIrrf: calculateIrrf(Math.max(0, totalAdditions - inss)).faixa,
+          baseIrrf: baseIrrfVal,
+          faixaIrrf: autoIrrf.faixa,
           items: vacationItems,
           taxes: vacationItems.map(it => ({
             name: it.description,
@@ -1330,7 +1440,32 @@ export default function MySalarySlips() {
           hasConstitutionalThird: newSlipForm.hasConstitutionalThird
         };
       } else {
-        const cleanItems = deduplicateSlipItems(newSlipItems);
+        const targetDaysRef = getMonthDaysReference(newSlipForm.month, newSlipForm.year);
+        const cleanItems = deduplicateSlipItems(newSlipItems).map(it => {
+          const isBase = it.code === '8781' || (it.description || '').toUpperCase().includes('DIAS NORMAIS') || (it.description || '').toUpperCase().includes('SALÁRIO BASE');
+          const is203 = it.code === '203' || it.code === '0203' || (it.description || '').toUpperCase().includes('SEGURO');
+          const is201 = it.code === '201' || it.code === '0201' || ((it.description || '').toUpperCase().includes('VALE') && (it.description || '').toUpperCase().includes('DESC'));
+          if (isBase) {
+            return {
+              ...it,
+              reference: targetDaysRef
+            };
+          }
+          if (is203) {
+            return {
+              ...it,
+              reference: (!it.reference || it.reference === '-') ? '1,12' : it.reference,
+              amount: it.amount > 0 ? it.amount : 1.12
+            };
+          }
+          if (is201) {
+            return {
+              ...it,
+              amount: it.amount > 0 ? it.amount : 3.96
+            };
+          }
+          return it;
+        });
         const totals = calculatePayrollTotals(cleanItems, newSlipForm.baseSalary);
 
         slipData = {
@@ -1392,6 +1527,7 @@ export default function MySalarySlips() {
       alert(isVacation 
         ? 'Documentações de Férias enviadas ao colaborador com sucesso! Assim que ele assinar e devolver pelo aplicativo, a via oficial será arquivada e salva no app dele.' 
         : 'Holerite despachado ao colaborador com sucesso! Assim que o colaborador assinar e devolver pelo aplicativo, a via oficial será arquivada e salva para ele no aplicativo.');
+      resetSlipForm(selectedAdminEmployee);
       setShowAddSlipModal(false);
       fetchData(); // Refresh list
     } catch (err) {
@@ -1465,34 +1601,7 @@ export default function MySalarySlips() {
         {isAdmin && (
           <button 
             onClick={() => {
-              const curMonth = new Date().getMonth() + 1;
-              const curYear = new Date().getFullYear();
-              const autoShifts = contarPlantoesTrabalhadosNoMes(empAttendanceForSlip, selectedAdminEmployee?.id || '', curMonth, curYear) || 15;
-              const vrCalc = calcularPontoEValeAutomatico(autoShifts);
-              setSlipPlantoes(autoShifts);
-              setNewSlipForm({
-                userId: selectedAdminEmployee?.id || '',
-                postoName: findEmployeeServicePost(selectedAdminEmployee) || selectedAdminEmployee?.postoName || 'MAESTRO LOCADORA DE',
-                month: curMonth,
-                year: curYear,
-                baseSalary: selectedAdminEmployee?.salary || 2500,
-                additions: [],
-                deductions: [
-                  {
-                    name: `DESC. VALE REFEIÇÃO 1% (${autoShifts} PLANTÕES)`,
-                    amount: Number(vrCalc.descontoNoSueldo)
-                  }
-                ],
-                documentType: 'salary',
-                vacationStart: '',
-                vacationEnd: '',
-                acquisitionStart: '',
-                acquisitionEnd: '',
-                vacationSalary: selectedAdminEmployee?.salary || 2500,
-                hasConstitutionalThird: true,
-                autoCalculateTaxes: true
-              });
-              setAdminModalTab('form');
+              resetSlipForm(selectedAdminEmployee);
               setShowAddSlipModal(true);
             }}
             className="px-5 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-bold shadow-lg shadow-blue-500/10 flex items-center gap-2 transition-all cursor-pointer"
@@ -1522,6 +1631,7 @@ export default function MySalarySlips() {
                     setSelectedSlip(null);
                     const firstEmp = employees.find(emp => emp.role !== 'admin' && emp.active !== false);
                     setSelectedAdminEmployee(firstEmp || null);
+                    if (firstEmp) resetSlipForm(firstEmp);
                   }}
                   type="button"
                   className={cn(
@@ -1539,6 +1649,7 @@ export default function MySalarySlips() {
                     setSelectedSlip(null);
                     const firstAdmin = employees.find(emp => emp.role === 'admin' && emp.active !== false);
                     setSelectedAdminEmployee(firstAdmin || null);
+                    if (firstAdmin) resetSlipForm(firstAdmin);
                   }}
                   type="button"
                   className={cn(
@@ -1561,6 +1672,7 @@ export default function MySalarySlips() {
                       onClick={() => {
                         setSelectedAdminEmployee(emp);
                         setSelectedSlip(null);
+                        resetSlipForm(emp);
                       }}
                       className={cn(
                         "w-full text-left p-3.5 rounded-2xl transition-all border flex items-center justify-between group",
@@ -2014,7 +2126,7 @@ export default function MySalarySlips() {
                                 salContrInss: selectedSlip.salContrInss || totalVencimentosFallback,
                                 baseFgts: selectedSlip.baseFgts || totalVencimentosFallback,
                                 fgtsMes: selectedSlip.fgtsMes || Number((totalVencimentosFallback * 0.08).toFixed(2)),
-                                baseIrrf: selectedSlip.baseIrrf || Math.max(0, totalVencimentosFallback - inssAmountFallback),
+                                baseIrrf: selectedSlip.baseIrrf ?? calculateBaseIrrf(totalVencimentosFallback, inssAmountFallback),
                                 faixaIrrf: selectedSlip.faixaIrrf || (irpfAmountFallback > 0 ? formatNumber(irpfAmountFallback) : 'ISENTO')
                               };
 
@@ -2134,7 +2246,13 @@ export default function MySalarySlips() {
                                         <div className="grid grid-cols-12 px-1 py-1 text-zinc-950 hover:bg-blue-50/20" key={item.id || idx}>
                                           <div className="col-span-1 text-center font-bold text-zinc-700">{item.code || '---'}</div>
                                           <div className="col-span-5 uppercase pl-3 truncate font-medium">{item.description}</div>
-                                          <div className="col-span-2 text-right text-zinc-800 pr-3 font-medium">{item.reference || '-'}</div>
+                                          <div className="col-span-2 text-right text-zinc-800 pr-3 font-medium">
+                                            {(item.code === '8781' || (item.description || '').toUpperCase().includes('DIAS NORMAIS') || (item.description || '').toUpperCase().includes('SALÁRIO BASE'))
+                                              ? getMonthDaysReference(selectedSlip.month, selectedSlip.year)
+                                              : ((item.code === '203' || item.code === '0203' || (item.description || '').toUpperCase().includes('SEGURO')) && (!item.reference || item.reference === '-')
+                                                  ? '1,12'
+                                                  : (item.reference || '-'))}
+                                          </div>
                                           <div className="col-span-2 text-right font-black pr-3">
                                             {isInfo ? <span className="text-zinc-300">-</span> : (isAdd ? formatNumber(item.amount) : <span className="text-zinc-300">-</span>)}
                                           </div>
@@ -2150,7 +2268,7 @@ export default function MySalarySlips() {
                                       <div className="grid grid-cols-12 px-1 py-1 text-zinc-950">
                                         <div className="col-span-1 text-center font-bold text-zinc-700">8781</div>
                                         <div className="col-span-5 uppercase pl-3">DIAS NORMAIS</div>
-                                        <div className="col-span-2 text-right text-zinc-800 pr-3">31,00</div>
+                                        <div className="col-span-2 text-right text-zinc-800 pr-3">{getMonthDaysReference(selectedSlip.month, selectedSlip.year)}</div>
                                         <div className="col-span-2 text-right font-black pr-3">{formatNumber(selectedSlip.baseSalary)}</div>
                                         <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
                                       </div>
@@ -2200,7 +2318,11 @@ export default function MySalarySlips() {
                                             {d.code || getRubricCode(d.name, '620')}
                                           </div>
                                           <div className="col-span-5 uppercase pl-3 truncate">{d.name}</div>
-                                          <div className="col-span-2 text-right text-zinc-800 pr-3">{d.reference || '-'}</div>
+                                          <div className="col-span-2 text-right text-zinc-800 pr-3">
+                                            {(d.code === '203' || d.code === '0203' || (d.name || '').toUpperCase().includes('SEGURO')) && (!d.reference || d.reference === '-')
+                                              ? '1,12'
+                                              : (d.reference || '-')}
+                                          </div>
                                           <div className="col-span-2 text-right text-zinc-300 pr-3">-</div>
                                           <div className="col-span-2 text-right font-black text-red-650 pr-3">{formatNumber(d.amount)}</div>
                                         </div>
@@ -2505,7 +2627,14 @@ export default function MySalarySlips() {
       {/* ADMIN ENVIAR HOLERITE DRAW MODAL */}
       <AnimatePresence>
         {showAddSlipModal && isAdmin && selectedAdminEmployee && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 overflow-y-auto">
+          <div 
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                handleCloseAddSlipModal();
+              }
+            }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 overflow-y-auto"
+          >
             <motion.div 
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
@@ -2513,20 +2642,32 @@ export default function MySalarySlips() {
               className="bg-white rounded-[2.5rem] p-6 lg:p-8 max-w-xl lg:max-w-5xl w-full border border-slate-100 shadow-2xl relative my-8 transition-all duration-300"
             >
               <button 
-                onClick={() => setShowAddSlipModal(false)}
+                onClick={handleCloseAddSlipModal}
                 className="absolute top-6 right-6 p-2 rounded-xl hover:bg-slate-50 text-slate-400 hover:text-slate-600 transition-all cursor-pointer z-10"
+                title="Fechar e Limpar Formulário"
               >
                 <X className="w-5 h-5" />
               </button>
 
-              <div className="mb-6 pr-8">
-                <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
-                  <Send className="w-6 h-6 text-blue-600 animate-pulse" />
-                  Enviar Holerite / Holerite Customizado
-                </h3>
-                <p className="text-slate-500 text-xs mt-1">
-                  Verifique e valide os dados da folha antes de despachar o documento oficial sob as leis trabalhistas.
-                </p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6 pr-8">
+                <div>
+                  <h3 className="text-xl font-bold text-slate-900 flex items-center gap-2">
+                    <Send className="w-6 h-6 text-blue-600 animate-pulse" />
+                    Enviar Holerite / Holerite Customizado
+                  </h3>
+                  <p className="text-slate-500 text-xs mt-1">
+                    Verifique e valide os dados da folha antes de despachar o documento oficial sob as leis trabalhistas.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => resetSlipForm(selectedAdminEmployee)}
+                  className="self-start sm:self-auto flex items-center gap-1.5 text-xs text-rose-600 hover:text-rose-700 font-bold bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-xl transition-all cursor-pointer border border-rose-100"
+                  title="Limpar todos os campos e rubricas digitadas"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Limpar Formulário
+                </button>
               </div>
 
               {/* Tab Selector for Mobile (stacked) layout */}
@@ -2692,21 +2833,70 @@ export default function MySalarySlips() {
 
                     {/* Fast rubric selector from catalog */}
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">
-                        Selecionar Rubrica do Catálogo (Preenchimento Rápido)
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase">
+                          Selecionar Rubrica do Catálogo (Preenchimento Rápido)
+                        </label>
+                      </div>
                       <select
                         value={selectedCatalogCode}
                         onChange={(e) => handleSelectCatalogRubric(e.target.value)}
                         className="w-full text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-100 cursor-pointer"
                       >
-                        <option value="">-- Escolha uma rubrica do catálogo (ex: 8781, 0150, 998, 508...) --</option>
-                        {allRubrics.map((r, idx) => (
-                          <option key={`${r.code}-${r.type}-${idx}`} value={`${r.code}:::${r.type}`}>
-                            {r.code} - {r.name} ({r.type === 'addition' ? 'Vencimento' : (r.type === 'info' ? 'Somente Referência' : 'Desconto')}{r.defaultReference ? ` • Ref: ${r.defaultReference}` : ''})
-                          </option>
-                        ))}
+                        <option value="">-- Escolha uma rubrica do catálogo (ex: 8781, 0150, 203, 201, 998, 508...) --</option>
+                        {allRubrics.map((r, idx) => {
+                          const isBase = r.code === '8781' || r.name.toUpperCase().includes('DIAS NORMAIS') || r.name.toUpperCase().includes('SALÁRIO BASE');
+                          let refText = isBase ? getMonthDaysReference(newSlipForm.month, newSlipForm.year) : r.defaultReference;
+                          if (r.code === '203' || r.code === '0203') refText = '1,12';
+                          const defaultValText = (r.code === '203' || r.code === '0203') 
+                            ? ' • R$ 1,12' 
+                            : ((r.code === '201' || r.code === '0201') ? ' • R$ 3,96' : (r.defaultAmount ? ` • R$ ${r.defaultAmount.toFixed(2)}` : ''));
+                          return (
+                            <option key={`${r.code}-${r.type}-${idx}`} value={`${r.code}:::${r.type}`}>
+                              {r.code} - {r.name} ({r.type === 'addition' ? 'Vencimento' : (r.type === 'info' ? 'Somente Referência' : 'Desconto')}{refText ? ` • Ref: ${refText}` : ''}{defaultValText})
+                            </option>
+                          );
+                        })}
                       </select>
+
+                      {/* Atalhos rápidos para rubricas com desconto padrão (203 e 201) */}
+                      <div className="flex flex-wrap items-center gap-2 pt-2">
+                        <span className="text-[10px] font-bold text-slate-400">Atalhos rápidos:</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setItemInput({
+                              code: '203',
+                              description: 'SEGURO DE VIDA EM GRUPO',
+                              reference: '1,12',
+                              type: 'deduction',
+                              amount: '1.12'
+                            });
+                            setSelectedCatalogCode('203:::deduction');
+                          }}
+                          className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-xs"
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5 text-rose-600" />
+                          + 203 Seguro de Vida (Ref: 1,12 • Desc: R$ 1,12)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setItemInput({
+                              code: '201',
+                              description: 'DESC. VALE REFEIÇÃO / ALIMENTAÇÃO',
+                              reference: '1,00%',
+                              type: 'deduction',
+                              amount: '3.96'
+                            });
+                            setSelectedCatalogCode('201:::deduction');
+                          }}
+                          className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 rounded-lg text-[10px] font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-xs"
+                        >
+                          <Wallet className="w-3.5 h-3.5 text-amber-600" />
+                          + 201 Desc. Vale Refeição (Desc: R$ 3,96)
+                        </button>
+                      </div>
                     </div>
 
                     {/* Inputs: Código, Descrição, Referência, Tipo, Valor */}
@@ -2715,18 +2905,30 @@ export default function MySalarySlips() {
                         <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Código</label>
                         <input
                           type="text"
-                          placeholder="Ex: 8781"
+                          placeholder="Ex: 8781, 203, 201"
                           value={itemInput.code}
                           onChange={(e) => {
                             const newCode = e.target.value;
-                            const match = allRubrics.find(r => r.code === newCode.trim());
+                            const clean = newCode.trim();
+                            const match = allRubrics.find(r => 
+                              r.code === clean || 
+                              r.code.replace(/^0+/, '') === clean.replace(/^0+/, '') ||
+                              r.code.padStart(4, '0') === clean.padStart(4, '0')
+                            );
                             if (match) {
+                              const isBase = match.code === '8781' || match.name.toUpperCase().includes('DIAS NORMAIS') || match.name.toUpperCase().includes('SALÁRIO BASE');
+                              let autoRef = isBase ? getMonthDaysReference(newSlipForm.month, newSlipForm.year) : (match.defaultReference || '-');
+                              const is203 = match.code === '203' || match.code === '0203' || match.name.toUpperCase().includes('SEGURO');
+                              const is201 = match.code === '201' || match.code === '0201' || (match.name.toUpperCase().includes('VALE') && match.name.toUpperCase().includes('DESC'));
+                              if (is203) autoRef = '1,12';
+                              const defaultVal = is203 ? '1.12' : (is201 ? '3.96' : (match.defaultAmount !== undefined ? String(match.defaultAmount) : ''));
                               setItemInput(prev => ({
                                 ...prev,
                                 code: newCode,
                                 description: prev.description && prev.description !== '-' ? prev.description : match.name,
                                 type: match.type,
-                                reference: prev.reference && prev.reference !== '-' ? prev.reference : (match.defaultReference || '-')
+                                reference: prev.reference && prev.reference !== '-' ? prev.reference : autoRef,
+                                amount: defaultVal !== '' ? defaultVal : prev.amount
                               }));
                             } else {
                               setItemInput(prev => ({ ...prev, code: newCode }));
@@ -2749,7 +2951,7 @@ export default function MySalarySlips() {
                         <label className="block text-[9px] font-bold text-slate-400 uppercase mb-1">Referência</label>
                         <input
                           type="text"
-                          placeholder="31,00 ou 7:30"
+                          placeholder={`${getMonthDaysReference(newSlipForm.month, newSlipForm.year)} ou 7:30`}
                           value={itemInput.reference}
                           onChange={(e) => setItemInput({ ...itemInput, reference: e.target.value })}
                           className="w-full text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-2 text-slate-800 focus:ring-2 focus:ring-blue-100"
@@ -3614,13 +3816,24 @@ export default function MySalarySlips() {
               </div>
 
               {/* Operations execute */}
-              <button 
-                onClick={handleCreateSlipSubmit}
-                className="w-full mt-6 py-4 bg-slate-900 hover:bg-black text-white font-black text-xs uppercase tracking-widest rounded-2xl transition-all cursor-pointer shadow-lg flex items-center justify-center gap-1.5"
-              >
-                <Send className="w-4 h-4 animate-bounce" style={{ animationDuration: '3s' }} />
-                Despachar e Enviar Holerite
-              </button>
+              <div className="flex flex-col sm:flex-row gap-3 mt-6">
+                <button
+                  type="button"
+                  onClick={handleCloseAddSlipModal}
+                  className="sm:w-1/3 py-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs uppercase tracking-wider rounded-2xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <X className="w-4 h-4" />
+                  Cancelar e Limpar
+                </button>
+                <button 
+                  type="button"
+                  onClick={handleCreateSlipSubmit}
+                  className="sm:flex-1 py-4 bg-slate-900 hover:bg-black text-white font-black text-xs uppercase tracking-widest rounded-2xl transition-all cursor-pointer shadow-lg flex items-center justify-center gap-1.5"
+                >
+                  <Send className="w-4 h-4 animate-bounce" style={{ animationDuration: '3s' }} />
+                  Despachar e Enviar Holerite
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
@@ -3782,7 +3995,14 @@ export default function MySalarySlips() {
                                   {r.type === 'addition' ? 'Vencimento' : 'Desconto'}
                                 </span>
                                 {r.defaultReference && (
-                                  <span className="text-[9px] text-slate-400">Ref: {r.defaultReference}</span>
+                                  <span className="text-[9px] text-slate-400">
+                                    Ref: {(r.code === '203' || r.code === '0203') ? '1,12' : r.defaultReference}
+                                  </span>
+                                )}
+                                {(r.defaultAmount !== undefined || r.code === '203' || r.code === '0203' || r.code === '201' || r.code === '0201') && (
+                                  <span className="text-[9px] text-rose-700 font-bold bg-rose-50 px-1 rounded">
+                                    Desc: R$ {formatNumber(r.code === '203' || r.code === '0203' ? 1.12 : (r.code === '201' || r.code === '0201' ? 3.96 : (r.defaultAmount || 0)))}
+                                  </span>
                                 )}
                                 {isCustom ? (
                                   <span className="text-[8px] font-bold text-blue-600 bg-blue-50 px-1 rounded">Personalizada</span>
